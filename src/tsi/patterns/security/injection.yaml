@@ -1,0 +1,208 @@
+# Injection Vulnerabilities (SQLi, Command Injection, etc.)
+# Category: Security | Type: Antipattern
+
+- id: sec-sql-injection
+  name: SQL Injection
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Concatenating user input directly into SQL queries allows attackers
+    to execute arbitrary SQL commands, leading to data theft or destruction.
+  
+  detection:
+    patterns:
+      - "\\$\\{.*\\}.*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)"
+      - "\\+.*(?:SELECT|INSERT|UPDATE|DELETE)"
+      - "query\\(['\"].*\\+.*['\"]\\)"
+    excludePatterns:
+      - "\\$[0-9]"
+      - "\\?"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: String concatenation in SQL
+        const query = `SELECT * FROM users WHERE id = ${userId}`;
+        const sql = "SELECT * FROM users WHERE name = '" + userName + "'";
+        db.query("DELETE FROM orders WHERE id = " + orderId);
+      good: |
+        // SAFE: Parameterized queries
+        const query = 'SELECT * FROM users WHERE id = $1';
+        await db.query(query, [userId]);
+        
+        // SAFE: Using ORM
+        const user = await User.findOne({ where: { id: userId } });
+        
+        // SAFE: Prepared statements
+        const stmt = db.prepare('SELECT * FROM users WHERE name = ?');
+        stmt.get(userName);
+  
+  risks:
+    - level: critical
+      description: Full database compromise, data theft, data destruction
+      mitigation: Always use parameterized queries or ORM
+    - level: critical
+      description: Authentication bypass
+      mitigation: Never trust user input in SQL queries
+  
+  alternatives:
+    - name: Parameterized Queries
+      description: Use $1, $2 placeholders with parameter arrays
+    - name: ORM (Sequelize, Prisma)
+      description: Use ORM which handles escaping automatically
+    - name: Query Builder
+      description: Use query builders like Knex.js
+  
+  tags: [sql-injection, security, database, critical, owasp-top10]
+  confidence: 0.95
+  riskScore: 98
+  
+  sources:
+    - name: OWASP SQL Injection
+      url: https://owasp.org/www-community/attacks/SQL_Injection
+
+- id: sec-command-injection
+  name: OS Command Injection
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Passing user input to shell commands allows attackers to execute
+    arbitrary system commands on the server.
+  
+  detection:
+    patterns:
+      - "exec\\(['\"].*\\$\\{"
+      - "execSync\\(['\"].*\\+"
+      - "spawn\\(['\"].*\\+"
+      - "child_process.*exec"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const { exec } = require('child_process');
+        exec(`ls -la ${userPath}`);
+        exec('ping ' + userHost);
+      good: |
+        const { execFile } = require('child_process');
+        // SAFE: Use execFile with arguments array
+        execFile('ls', ['-la', sanitizedPath]);
+        
+        // SAFE: Validate and sanitize input
+        if (!/^[a-zA-Z0-9.-]+$/.test(userHost)) {
+          throw new Error('Invalid hostname');
+        }
+        execFile('ping', ['-c', '4', userHost]);
+  
+  risks:
+    - level: critical
+      description: Full server compromise, RCE (Remote Code Execution)
+      mitigation: Use execFile with argument arrays, validate all input
+  
+  tags: [command-injection, security, rce, critical, nodejs]
+  confidence: 0.95
+  riskScore: 98
+
+- id: sec-path-traversal
+  name: Path Traversal
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Allowing user-controlled paths without validation enables attackers
+    to access files outside intended directories.
+  
+  detection:
+    patterns:
+      - "readFile.*\\$\\{"
+      - "readFileSync.*\\+"
+      - "fs\\..*\\(.*req\\."
+      - "path\\.join.*req\\."
+    excludePatterns:
+      - "path\\.resolve"
+      - "path\\.normalize"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Direct user input in file path
+        const filePath = `./uploads/${req.params.filename}`;
+        fs.readFile(filePath);
+        
+        // Attacker can use: ../../../etc/passwd
+      good: |
+        const path = require('path');
+        
+        // SAFE: Resolve and validate path
+        const baseDir = path.resolve('./uploads');
+        const filePath = path.resolve(baseDir, req.params.filename);
+        
+        // Ensure path stays within base directory
+        if (!filePath.startsWith(baseDir)) {
+          throw new Error('Invalid path');
+        }
+        
+        fs.readFile(filePath);
+  
+  risks:
+    - level: high
+      description: Access to sensitive files, source code, credentials
+      mitigation: Validate paths stay within intended directory
+  
+  tags: [path-traversal, security, file-access, lfi]
+  confidence: 0.9
+  riskScore: 85
+
+- id: sec-nosql-injection
+  name: NoSQL Injection
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    MongoDB and other NoSQL databases are vulnerable to injection
+    when query operators come from user input.
+  
+  detection:
+    patterns:
+      - "find\\(.*req\\."
+      - "findOne\\(.*body\\."
+      - "\\$where.*\\+"
+      - "\\$regex.*req\\."
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Direct user input in query
+        const user = await User.findOne({
+          username: req.body.username,
+          password: req.body.password  // Can be { $ne: null }
+        });
+      good: |
+        // SAFE: Sanitize input, ensure strings
+        const username = String(req.body.username || '');
+        const password = String(req.body.password || '');
+        
+        const user = await User.findOne({
+          username: { $eq: username },
+          password: { $eq: password }
+        });
+        
+        // Or use a library like mongo-sanitize
+        const sanitize = require('mongo-sanitize');
+        const user = await User.findOne({
+          username: sanitize(req.body.username)
+        });
+  
+  risks:
+    - level: high
+      description: Authentication bypass, data exfiltration
+      mitigation: Sanitize input, use $eq operator explicitly
+  
+  tags: [nosql-injection, mongodb, security, authentication]
+  confidence: 0.9
+  riskScore: 85

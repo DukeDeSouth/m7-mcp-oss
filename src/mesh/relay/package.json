@@ -1,0 +1,16 @@
+{
+  "name": "@m7/mesh-relay",
+  "version": "1.0.0",
+  "description": "M7 Mesh Relay — coordination server for multiple M7 MCP instances",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "tsc"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.3"
+  }
+}

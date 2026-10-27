@@ -1,0 +1,183 @@
+# React-Specific Security Patterns
+# Category: Security | Type: Antipattern
+
+- id: sec-react-dangerously-set
+  name: dangerouslySetInnerHTML XSS
+  technology: react
+  category: security
+  type: antipattern
+  description: |
+    Using dangerouslySetInnerHTML with unsanitized user input
+    bypasses React's XSS protection.
+  
+  detection:
+    patterns:
+      - "dangerouslySetInnerHTML"
+      - "__html.*\\$\\{"
+      - "__html.*\\+"
+    excludePatterns:
+      - "DOMPurify"
+      - "sanitize"
+    fileTypes: [jsx, tsx]
+  
+  examples:
+    - language: jsx
+      bad: |
+        // DANGEROUS: Direct user input
+        function Comment({ content }) {
+          return <div dangerouslySetInnerHTML={{ __html: content }} />;
+        }
+      good: |
+        import DOMPurify from 'dompurify';
+        
+        function Comment({ content }) {
+          // SAFE: Sanitize before rendering
+          const sanitized = DOMPurify.sanitize(content, {
+            ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'a'],
+            ALLOWED_ATTR: ['href']
+          });
+          return <div dangerouslySetInnerHTML={{ __html: sanitized }} />;
+        }
+        
+        // Or better: use a markdown parser
+        import ReactMarkdown from 'react-markdown';
+        function Comment({ content }) {
+          return <ReactMarkdown>{content}</ReactMarkdown>;
+        }
+  
+  risks:
+    - level: critical
+      description: XSS attacks, session hijacking, data theft
+      mitigation: Always sanitize HTML with DOMPurify or similar
+  
+  tags: [react, xss, dangerously, security, critical]
+  confidence: 0.95
+  riskScore: 95
+
+- id: sec-react-href-javascript
+  name: JavaScript Protocol in href
+  technology: react
+  category: security
+  type: antipattern
+  description: |
+    Allowing javascript: URLs in href attributes enables XSS attacks.
+  
+  detection:
+    patterns:
+      - "href=\\{.*\\}"
+      - "href.*javascript:"
+    excludePatterns:
+      - "sanitizeUrl"
+      - "isValidUrl"
+    fileTypes: [jsx, tsx]
+  
+  examples:
+    - language: jsx
+      bad: |
+        // DANGEROUS: User-controlled URL
+        function Link({ url, text }) {
+          return <a href={url}>{text}</a>;
+        }
+        // Attacker can pass: javascript:alert(document.cookie)
+      good: |
+        function Link({ url, text }) {
+          // SAFE: Validate URL protocol
+          const safeUrl = url.startsWith('http://') || url.startsWith('https://')
+            ? url
+            : '#';
+          return <a href={safeUrl}>{text}</a>;
+        }
+        
+        // Or use a URL sanitizer
+        import { sanitizeUrl } from '@braintree/sanitize-url';
+        function Link({ url, text }) {
+          return <a href={sanitizeUrl(url)}>{text}</a>;
+        }
+  
+  risks:
+    - level: high
+      description: XSS via javascript: protocol
+      mitigation: Validate URL protocol, use sanitize-url library
+  
+  tags: [react, xss, href, url, security]
+  confidence: 0.85
+  riskScore: 80
+
+- id: sec-react-target-blank
+  name: Missing rel="noopener" with target="_blank"
+  technology: react
+  category: security
+  type: antipattern
+  description: |
+    Links with target="_blank" without rel="noopener noreferrer"
+    expose the opener window to manipulation via window.opener.
+  
+  detection:
+    patterns:
+      - "target=['\"]_blank['\"](?!.*noopener)"
+    fileTypes: [jsx, tsx, js, ts, html]
+  
+  examples:
+    - language: jsx
+      bad: |
+        <a href={userUrl} target="_blank">External Link</a>
+      good: |
+        <a 
+          href={userUrl} 
+          target="_blank" 
+          rel="noopener noreferrer"
+        >
+          External Link
+        </a>
+  
+  risks:
+    - level: medium
+      description: Opener page can be redirected via window.opener
+      mitigation: Always add rel="noopener noreferrer" with target="_blank"
+  
+  tags: [react, security, links, tabnabbing]
+  confidence: 0.9
+  riskScore: 50
+
+- id: sec-react-state-secrets
+  name: Secrets in React State
+  technology: react
+  category: security
+  type: antipattern
+  description: |
+    Storing sensitive data in React state or context makes it
+    accessible via React DevTools.
+  
+  detection:
+    patterns:
+      - "useState.*password"
+      - "useState.*token"
+      - "useState.*apiKey"
+      - "context.*secret"
+    fileTypes: [jsx, tsx]
+  
+  examples:
+    - language: jsx
+      bad: |
+        // DANGEROUS: Secrets visible in DevTools
+        const [apiKey, setApiKey] = useState(process.env.REACT_APP_API_KEY);
+        const AuthContext = createContext({ token: userToken });
+      good: |
+        // SAFE: Keep secrets on server side
+        // Use httpOnly cookies for session tokens
+        // Make API calls through backend proxy
+        
+        // Frontend only stores non-sensitive user info
+        const [user, setUser] = useState({ name: '', email: '' });
+        
+        // API calls go through backend that adds auth
+        const response = await fetch('/api/data');
+  
+  risks:
+    - level: high
+      description: Secrets exposed via React DevTools
+      mitigation: Keep secrets server-side, use httpOnly cookies
+  
+  tags: [react, secrets, devtools, security]
+  confidence: 0.85
+  riskScore: 75

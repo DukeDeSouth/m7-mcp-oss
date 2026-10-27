@@ -1,0 +1,225 @@
+# Database Performance Anti-Patterns
+# Category: Performance | Type: Antipattern
+
+- id: perf-n-plus-one
+  name: N+1 Query Problem
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    Loading related data in a loop causes N+1 database queries,
+    dramatically degrading performance at scale.
+  
+  detection:
+    patterns:
+      - "for.*await.*find"
+      - "forEach.*await.*query"
+      - "map.*await.*findOne"
+      - "\\.map\\(async.*find"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SLOW: N+1 queries (1 for users + N for posts)
+        const users = await User.find();
+        for (const user of users) {
+          user.posts = await Post.find({ userId: user.id });
+        }
+        
+        // SLOW: Same problem with map
+        const usersWithPosts = await Promise.all(
+          users.map(async (user) => ({
+            ...user,
+            posts: await Post.find({ userId: user.id })
+          }))
+        );
+      good: |
+        // FAST: 2 queries total
+        const users = await User.find();
+        const userIds = users.map(u => u.id);
+        const posts = await Post.find({ userId: { $in: userIds } });
+        
+        // Group posts by user
+        const postsByUser = posts.reduce((acc, post) => {
+          acc[post.userId] = acc[post.userId] || [];
+          acc[post.userId].push(post);
+          return acc;
+        }, {});
+        
+        users.forEach(user => {
+          user.posts = postsByUser[user.id] || [];
+        });
+        
+        // Or use ORM population
+        const users = await User.find().populate('posts');
+  
+  risks:
+    - level: high
+      description: Response time grows linearly with data, database overload
+      mitigation: Use batch queries, eager loading, or ORM populate
+  
+  alternatives:
+    - name: Batch Loading
+      description: Use $in queries to load all related data at once
+    - name: ORM Populate
+      description: Use ORM's eager loading (populate/include)
+    - name: DataLoader
+      description: Use DataLoader pattern for deduplication
+  
+  tags: [n+1, database, performance, query, orm]
+  confidence: 0.9
+  riskScore: 70
+
+- id: perf-missing-index
+  name: Missing Database Index
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    Querying fields without indexes causes full table scans,
+    significantly slowing queries on large tables.
+  
+  detection:
+    patterns:
+      - "find\\(\\{(?!.*_id)"
+      - "findOne\\(\\{(?!.*_id)"
+      - "WHERE.*=(?!.*id)"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SLOW: Full table scan on email (assuming no index)
+        const user = await User.findOne({ email: req.body.email });
+        
+        // SLOW: Scanning on unindexed status
+        const orders = await Order.find({ status: 'pending' });
+      good: |
+        // Create indexes in your schema
+        const userSchema = new Schema({
+          email: { type: String, unique: true, index: true },
+          username: { type: String, index: true }
+        });
+        
+        const orderSchema = new Schema({
+          status: { type: String, index: true },
+          userId: { type: ObjectId, index: true },
+          createdAt: { type: Date, index: true }
+        });
+        
+        // Compound indexes for multi-field queries
+        orderSchema.index({ userId: 1, status: 1 });
+  
+  risks:
+    - level: medium
+      description: Slow queries, high database CPU usage
+      mitigation: Add indexes on frequently queried fields
+  
+  tags: [index, database, performance, query]
+  confidence: 0.7
+  riskScore: 60
+
+- id: perf-select-all
+  name: SELECT * Anti-Pattern
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    Selecting all columns when only a few are needed wastes bandwidth
+    and memory, especially with large text/blob fields.
+  
+  detection:
+    patterns:
+      - "\\.find\\(\\{\\}\\)"
+      - "findAll\\(\\)"
+      - "SELECT \\*"
+    excludePatterns:
+      - "\\.select\\("
+      - "projection"
+      - "attributes"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SLOW: Loads all fields including large content
+        const users = await User.find({});
+        const posts = await Post.findAll();
+      good: |
+        // FAST: Only select needed fields
+        const users = await User.find({}).select('name email avatar');
+        
+        // Prisma example
+        const users = await prisma.user.findMany({
+          select: { id: true, name: true, email: true }
+        });
+        
+        // Sequelize example
+        const posts = await Post.findAll({
+          attributes: ['id', 'title', 'createdAt']
+        });
+  
+  risks:
+    - level: medium
+      description: Unnecessary data transfer, memory bloat
+      mitigation: Use projection to select only needed fields
+  
+  tags: [database, performance, select, projection]
+  confidence: 0.8
+  riskScore: 50
+
+- id: perf-no-pagination
+  name: Missing Pagination
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    Loading all records without pagination can crash the server
+    with memory exhaustion on large datasets.
+  
+  detection:
+    patterns:
+      - "find\\(\\)(?!.*limit)"
+      - "findAll\\(\\)(?!.*limit)"
+      - "query\\((?!.*LIMIT)"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Loads entire table into memory
+        app.get('/api/users', async (req, res) => {
+          const users = await User.find();
+          res.json(users);
+        });
+      good: |
+        app.get('/api/users', async (req, res) => {
+          const page = parseInt(req.query.page) || 1;
+          const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+          const skip = (page - 1) * limit;
+          
+          const [users, total] = await Promise.all([
+            User.find().skip(skip).limit(limit),
+            User.countDocuments()
+          ]);
+          
+          res.json({
+            data: users,
+            meta: {
+              page,
+              limit,
+              total,
+              totalPages: Math.ceil(total / limit)
+            }
+          });
+        });
+  
+  risks:
+    - level: high
+      description: Memory exhaustion, server crash, slow responses
+      mitigation: Always implement pagination with reasonable limits
+  
+  tags: [pagination, database, performance, memory]
+  confidence: 0.85
+  riskScore: 75

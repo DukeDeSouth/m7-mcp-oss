@@ -1,0 +1,238 @@
+# M7 Methodology Configuration
+# Version: 2.0.0
+# Generated: 2025-08-29
+
+project:
+  name: "M7 MCP Server"
+  version: "2.0.0"
+  description: "Advanced multiagent system with Model Context Protocol integration"
+  methodology: "M7 IDEAL"
+  
+agents:
+  research:
+    provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+    specialization: "Deep research, analysis, documentation"
+    strengths: ["thorough_analysis", "context_understanding", "research"]
+    cost_tier: "premium"
+    
+  implementation:
+    provider: "openai"
+    model: "gpt-4o"
+    specialization: "Fast coding, optimization, debugging"
+    strengths: ["code_generation", "practical_solutions", "debugging"]
+    cost_tier: "balanced"
+    
+  architecture:
+    provider: "openai"
+    model: "gpt-4-1106-preview"
+    specialization: "System design, technical architecture"
+    strengths: ["structured_thinking", "technical_depth", "patterns"]
+    cost_tier: "premium"
+    
+  security:
+    provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+    specialization: "Security audit, vulnerabilities, RLS"
+    strengths: ["security_awareness", "risk_analysis", "careful_reasoning"]
+    cost_tier: "premium"
+    
+  testing:
+    provider: "openai"
+    model: "gpt-4-1106-preview"
+    specialization: "Test generation, validation, QA"
+    strengths: ["test_coverage", "edge_cases", "automation"]
+    cost_tier: "balanced"
+    
+  performance:
+    provider: "anthropic"
+    model: "claude-3-haiku-20240307"
+    specialization: "Performance optimization, metrics"
+    strengths: ["efficiency", "fast_analysis", "optimization"]
+    cost_tier: "economy"
+
+methodology:
+  phases:
+    discovery:
+      duration_percent: 25
+      focus: "Research, exploration, understanding"
+      deliverables: ["DISCOVERY_REPORT.md"]
+      
+    architecture:
+      duration_percent: 15
+      focus: "Current system analysis, mapping"
+      deliverables: ["ARCHITECTURE_CONTEXT.md"]
+      
+    planning:
+      duration_percent: 40
+      focus: "Iterative design, optimization"
+      deliverables: ["SOLUTION_PLAN.md", "IMPACT_ANALYSIS.md", "IMPLEMENTATION_SIMULATION.md", "RISK_MITIGATION.md"]
+      
+    implementation:
+      duration_percent: 20
+      focus: "Code execution, following simulation"
+      deliverables: ["IMPLEMENTATION_REPORT.md"]
+
+  cognitive_safeguards:
+    critical_risks: "Resolve before proceeding — protects against compounding failures"
+    major_risks: "Flag for review — prevents silent regressions"
+    minor_risks: "Proceed with awareness — monitoring recommended"
+    
+  file_system:
+    required_files: 7
+    naming_pattern: "ALL_CAPS.md"
+    location: "docs/debug/{task_name}/"
+
+tools:
+  mcp_integration: true
+  hive_system: true
+  context7_docs: true
+  playwright_testing: true
+  
+  core_tools: 10
+  critical_tools: 5
+  specialized_tools: 2
+  
+integrations:
+  cursor_ide: true
+  mcp_protocol: true
+  openai_api: true
+  anthropic_api: true
+
+# M7 v4.0 Evolution Features
+features:
+  # HEAVY-first routing - все задачи идут через HEAVY route
+  heavy_first_routing: true
+  
+  # Автоматическая интерпретация после Discovery
+  auto_interpretation: true
+  
+  # Task Graph - хранение связей между задачами
+  task_graph: true
+  
+  # Task Transfer - документированный перенос задач
+  task_transfer: true
+  
+  # Scope Alerts - предупреждения о росте scope
+  scope_alerts: true
+  
+  # Порог для scope alert (множитель)
+  scope_alert_threshold: 2.0
+
+# M7 v4.0 Interpretation Settings
+interpretation:
+  # Формат вывода: compact | detailed | hybrid
+  output_format: "hybrid"
+  
+  # Включать детали Discovery в collapsible
+  include_discovery_details: true
+  
+  # Максимум файлов в выводе
+  max_files_in_output: 5
+  
+  # Максимум похожего кода в выводе
+  max_similar_code_in_output: 3
+
+# M7 v3.10 Reliability Settings
+reliability:
+  # Atomic Write Configuration
+  backup:
+    # Maximum number of backup files to keep per file (.bak.1 → .bak.5)
+    max_count: 5
+    # Create backup before overwriting
+    enabled: true
+    # Verify write by reading back (slower but safer)
+    verify_write: false
+    # Temp file prefix
+    temp_prefix: ".tmp-"
+    # Backup file suffix
+    backup_suffix: ".bak"
+  
+  # Retry Configuration for API calls
+  retry:
+    # Maximum number of retry attempts
+    max_attempts: 3
+    # Initial delay before first retry (milliseconds)
+    initial_delay_ms: 500
+    # Maximum delay between retries (milliseconds)
+    max_delay_ms: 30000
+    # Jitter factor (0-1) to prevent thundering herd
+    jitter: 0.1
+    # Backoff multiplier (delay doubles each attempt by default)
+    backoff_multiplier: 2
+    # Errors that should be retried
+    retryable_errors:
+      - RATE_LIMIT
+      - TIMEOUT
+      - SERVICE_UNAVAILABLE
+      - GATEWAY_TIMEOUT
+      - CONNECTION_RESET
+      - NETWORK_ERROR
+      - INTERNAL_ERROR
+    # Errors that should NOT be retried (fail immediately)
+    fatal_errors:
+      - AUTHENTICATION
+      - INVALID_API_KEY
+      - BILLING
+      - INVALID_REQUEST
+      - PERMISSION_DENIED
+      - CONTENT_POLICY
+  
+  # Provider Cooldown Configuration (Circuit Breaker Lite)
+  cooldown:
+    # Base cooldown duration (milliseconds) - time provider is unavailable
+    base_cooldown_ms: 60000  # 1 minute
+    # Maximum cooldown duration (milliseconds)
+    max_cooldown_ms: 300000  # 5 minutes
+    # Cooldown multiplier for consecutive failures
+    cooldown_multiplier: 1.5
+    # Number of failures before entering cooldown
+    failures_before_cooldown: 2
+    # Number of failures before marking as failed (requires manual intervention)
+    failures_before_failed: 5
+    # Time window for counting failures (milliseconds)
+    failure_window_ms: 300000  # 5 minutes
+    # Auto-recover from failed state after this time (milliseconds)
+    auto_recover_ms: 600000  # 10 minutes
+  
+  # Automatic Failover Configuration
+  failover:
+    # Enable automatic failover to alternate provider
+    enabled: true
+    # Preferred provider order
+    preferred_order:
+      - anthropic
+      - openai
+    # Maximum failover attempts per request
+    max_failover_attempts: 1
+    # Log failover events
+    log_failovers: true
+  
+  # Context Window Guard Configuration
+  context_guard:
+    # Enable context window protection
+    enabled: true
+    # Auto-truncate content when over limit
+    auto_truncate: true
+    # Warn when context utilization exceeds this percentage
+    warning_threshold: 80
+    # Error when context utilization exceeds this percentage  
+    error_threshold: 95
+    # Log context usage
+    log_usage: true
+    # Truncation settings
+    truncation:
+      # Strategy: tail, head, middle, smart
+      strategy: smart
+      # Preserve system prompt (never truncate)
+      preserve_system_prompt: true
+      # Minimum tokens to keep at start
+      min_head_tokens: 500
+      # Minimum tokens to keep at end
+      min_tail_tokens: 2000
+      # Add truncation marker
+      add_marker: true
+
+# M7 cycle orchestrator (Sprint 8)
+cycle:
+  rule_reinjection_threshold: 18

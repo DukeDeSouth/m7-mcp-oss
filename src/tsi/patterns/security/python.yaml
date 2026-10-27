@@ -1,0 +1,209 @@
+# Python Security Patterns
+# Category: Security | Type: Antipattern
+
+- id: sec-py-pickle
+  name: Unsafe Pickle Deserialization
+  technology: python
+  category: security
+  type: antipattern
+  description: |
+    Deserializing untrusted pickle data can execute arbitrary code.
+    Never unpickle data from untrusted sources.
+  
+  detection:
+    patterns:
+      - "pickle\\.load"
+      - "pickle\\.loads"
+      - "cPickle\\.load"
+    fileTypes: [py]
+  
+  examples:
+    - language: python
+      bad: |
+        import pickle
+        # DANGEROUS: Unpickling user data
+        data = pickle.loads(request.data)
+        obj = pickle.load(open(user_file, 'rb'))
+      good: |
+        import json
+        # SAFE: Use JSON for data exchange
+        data = json.loads(request.data)
+        
+        # If you must use pickle, restrict classes
+        import pickle
+        class RestrictedUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if module == "builtins" and name in ("str", "int", "list"):
+                    return getattr(__import__(module), name)
+                raise pickle.UnpicklingError(f"Forbidden: {module}.{name}")
+  
+  risks:
+    - level: critical
+      description: Remote code execution via malicious pickle data
+      mitigation: Use JSON or restricted unpickler
+  
+  tags: [python, pickle, serialization, rce, critical]
+  confidence: 0.95
+  riskScore: 98
+
+- id: sec-py-yaml-load
+  name: Unsafe YAML Loading
+  technology: python
+  category: security
+  type: antipattern
+  description: |
+    Using yaml.load() without a safe Loader can execute arbitrary Python code.
+  
+  detection:
+    patterns:
+      - "yaml\\.load\\([^,)]+\\)"
+      - "yaml\\.load.*Loader=None"
+    excludePatterns:
+      - "safe_load"
+      - "SafeLoader"
+      - "CSafeLoader"
+    fileTypes: [py]
+  
+  examples:
+    - language: python
+      bad: |
+        import yaml
+        # DANGEROUS: Uses unsafe default loader
+        data = yaml.load(user_input)
+        data = yaml.load(file, Loader=None)
+      good: |
+        import yaml
+        # SAFE: Use safe_load
+        data = yaml.safe_load(user_input)
+        # Or explicitly specify SafeLoader
+        data = yaml.load(file, Loader=yaml.SafeLoader)
+  
+  risks:
+    - level: critical
+      description: Remote code execution via YAML deserialization
+      mitigation: Always use yaml.safe_load() or SafeLoader
+  
+  tags: [python, yaml, serialization, rce, critical]
+  confidence: 0.95
+  riskScore: 95
+
+- id: sec-py-sql-format
+  name: Python SQL Format String
+  technology: python
+  category: security
+  type: antipattern
+  description: |
+    Using string formatting for SQL queries enables SQL injection.
+  
+  detection:
+    patterns:
+      - "execute\\(.*%.*%"
+      - "execute\\(.*\\.format\\("
+      - "execute\\(f['\"]"
+      - "execute\\(['\"].*\\+.*['\"]\\)"
+    fileTypes: [py]
+  
+  examples:
+    - language: python
+      bad: |
+        # DANGEROUS: String formatting in SQL
+        cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
+        cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
+        cursor.execute("SELECT * FROM users WHERE name = '{}'".format(name))
+      good: |
+        # SAFE: Parameterized queries
+        cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        
+        # SAFE: Using ORM
+        user = User.objects.get(id=user_id)
+  
+  risks:
+    - level: critical
+      description: SQL injection, database compromise
+      mitigation: Use parameterized queries or ORM
+  
+  tags: [python, sql-injection, database, critical]
+  confidence: 0.95
+  riskScore: 95
+
+- id: sec-py-shell-true
+  name: subprocess shell=True
+  technology: python
+  category: security
+  type: antipattern
+  description: |
+    Using shell=True with subprocess allows command injection attacks.
+  
+  detection:
+    patterns:
+      - "subprocess.*shell=True"
+      - "os\\.system\\("
+      - "os\\.popen\\("
+    fileTypes: [py]
+  
+  examples:
+    - language: python
+      bad: |
+        import subprocess
+        # DANGEROUS: shell=True with user input
+        subprocess.call(f"ls {user_path}", shell=True)
+        os.system("ping " + user_host)
+      good: |
+        import subprocess
+        import shlex
+        # SAFE: Use list of arguments
+        subprocess.call(["ls", user_path])
+        subprocess.run(["ping", "-c", "4", user_host])
+        
+        # If you must use shell, quote properly
+        subprocess.call(f"ls {shlex.quote(user_path)}", shell=True)
+  
+  risks:
+    - level: critical
+      description: Command injection, system compromise
+      mitigation: Use argument list, avoid shell=True
+  
+  tags: [python, command-injection, subprocess, critical]
+  confidence: 0.95
+  riskScore: 95
+
+- id: sec-py-assert
+  name: Assert for Security Checks
+  technology: python
+  category: security
+  type: antipattern
+  description: |
+    Using assert for security checks is dangerous because assertions
+    are disabled when Python runs with -O optimization flag.
+  
+  detection:
+    patterns:
+      - "assert.*is_admin"
+      - "assert.*authenticated"
+      - "assert.*authorized"
+      - "assert.*permission"
+    fileTypes: [py]
+  
+  examples:
+    - language: python
+      bad: |
+        # DANGEROUS: Assertions disabled with -O flag
+        assert user.is_admin, "Admin required"
+        assert request.user.is_authenticated
+      good: |
+        # SAFE: Proper conditional checks
+        if not user.is_admin:
+            raise PermissionError("Admin required")
+        
+        if not request.user.is_authenticated:
+            raise AuthenticationError("Login required")
+  
+  risks:
+    - level: high
+      description: Security checks bypassed with -O flag
+      mitigation: Use if/raise instead of assert for security
+  
+  tags: [python, assert, security, authentication]
+  confidence: 0.9
+  riskScore: 80

@@ -1,0 +1,139 @@
+# XSS (Cross-Site Scripting) Vulnerabilities
+# Category: Security | Type: Antipattern
+
+- id: sec-xss-innerhtml
+  name: innerHTML XSS Vulnerability
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Using innerHTML with untrusted user input allows attackers to inject 
+    malicious scripts that execute in victims' browsers.
+  
+  detection:
+    patterns:
+      - "innerHTML\\s*="
+      - "\\.innerHTML\\s*\\+="
+    excludePatterns:
+      - "DOMPurify\\.sanitize"
+      - "sanitizeHtml"
+    fileTypes: [js, ts, jsx, tsx]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Direct user input in innerHTML
+        element.innerHTML = userInput;
+        container.innerHTML = `<div>${userData.name}</div>`;
+      good: |
+        // SAFE: Use textContent for plain text
+        element.textContent = userInput;
+        
+        // SAFE: Use DOMPurify for HTML
+        import DOMPurify from 'dompurify';
+        element.innerHTML = DOMPurify.sanitize(userInput);
+        
+        // SAFE: Use DOM APIs
+        const div = document.createElement('div');
+        div.textContent = userData.name;
+        container.appendChild(div);
+  
+  risks:
+    - level: critical
+      description: Attackers can steal session cookies, credentials, and sensitive data
+      mitigation: Use textContent for plain text, DOMPurify for HTML content
+    - level: high
+      description: Can lead to account takeover and data theft
+      mitigation: Implement Content Security Policy (CSP)
+  
+  alternatives:
+    - name: textContent
+      description: For plain text content, use textContent which auto-escapes
+    - name: DOMPurify
+      description: Sanitize HTML before insertion with DOMPurify library
+    - name: React JSX
+      description: React automatically escapes values in JSX expressions
+  
+  tags: [xss, security, dom, frontend, critical, owasp-top10]
+  confidence: 0.95
+  riskScore: 95
+  
+  sources:
+    - name: OWASP XSS Prevention
+      url: https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html
+
+- id: sec-xss-document-write
+  name: document.write XSS
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    document.write() can introduce XSS vulnerabilities and blocks page rendering.
+    Avoid it entirely in modern applications.
+  
+  detection:
+    patterns:
+      - "document\\.write\\("
+      - "document\\.writeln\\("
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        document.write('<script src="' + userUrl + '"></script>');
+      good: |
+        const script = document.createElement('script');
+        script.src = sanitizeUrl(userUrl);
+        document.head.appendChild(script);
+  
+  risks:
+    - level: high
+      description: XSS via injected scripts, blocks page rendering
+      mitigation: Use DOM APIs instead of document.write
+  
+  tags: [xss, security, deprecated, document-write]
+  confidence: 0.9
+  riskScore: 80
+
+- id: sec-xss-eval
+  name: eval() Code Injection
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    eval() executes arbitrary code and is a major security risk.
+    Never use eval() with user-controlled input.
+  
+  detection:
+    patterns:
+      - "eval\\("
+      - "new Function\\("
+      - "setTimeout\\(['\"]"
+      - "setInterval\\(['\"]"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        eval(userInput);
+        new Function(userCode)();
+        setTimeout("alert(" + msg + ")", 100);
+      good: |
+        // Use JSON.parse for data
+        const data = JSON.parse(jsonString);
+        
+        // Use proper function references
+        setTimeout(() => showAlert(msg), 100);
+        
+        // For dynamic expressions, use a safe parser
+        import { evaluate } from 'mathjs';
+        const result = evaluate(mathExpression);
+  
+  risks:
+    - level: critical
+      description: Arbitrary code execution leading to full compromise
+      mitigation: Never use eval with user input, use safe alternatives
+  
+  tags: [xss, security, eval, code-injection, critical]
+  confidence: 0.98
+  riskScore: 98

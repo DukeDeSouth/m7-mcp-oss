@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+.m7/
+*.log
+*.pid
+.DS_Store
+test-results/
+coverage/

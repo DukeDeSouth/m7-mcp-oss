@@ -1,0 +1,244 @@
+# Authentication & Authorization Vulnerabilities
+# Category: Security | Type: Antipattern
+
+- id: sec-hardcoded-secrets
+  name: Hardcoded Secrets
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Hardcoding API keys, passwords, or secrets in source code exposes
+    them in version control and compiled artifacts.
+  
+  detection:
+    patterns:
+      - "password\\s*[=:]\\s*['\"][^'\"]{8,}"
+      - "api[_-]?key\\s*[=:]\\s*['\"][A-Za-z0-9]{16,}"
+      - "secret\\s*[=:]\\s*['\"][^'\"]{8,}"
+      - "token\\s*[=:]\\s*['\"][A-Za-z0-9._-]{20,}"
+      - "AWS_ACCESS_KEY"
+      - "PRIVATE_KEY"
+    excludePatterns:
+      - "process\\.env"
+      - "import\\.meta\\.env"
+      - "\\$\\{.*\\}"
+    fileTypes: [js, ts, jsx, tsx, py, go, java]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const API_KEY = 'sk-1234567890abcdef';
+        const DB_PASSWORD = 'super_secret_password';
+        const JWT_SECRET = 'my-jwt-secret-key-2024';
+      good: |
+        // Use environment variables
+        const API_KEY = process.env.API_KEY;
+        const DB_PASSWORD = process.env.DB_PASSWORD;
+        const JWT_SECRET = process.env.JWT_SECRET;
+        
+        // Validate at startup
+        if (!API_KEY) {
+          throw new Error('API_KEY environment variable is required');
+        }
+  
+  risks:
+    - level: critical
+      description: Secrets exposed in git history, logs, and error messages
+      mitigation: Use environment variables or secret management services
+  
+  alternatives:
+    - name: Environment Variables
+      description: Store secrets in .env files (not committed) or CI/CD
+    - name: Secret Manager
+      description: Use AWS Secrets Manager, HashiCorp Vault, etc.
+    - name: Config Service
+      description: Use a configuration service for runtime secrets
+  
+  tags: [secrets, credentials, security, critical, git-leaks]
+  confidence: 0.95
+  riskScore: 95
+
+- id: sec-weak-password-hash
+  name: Weak Password Hashing
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Using MD5, SHA1, or unsalted hashes for passwords makes them
+    vulnerable to rainbow table and brute force attacks.
+  
+  detection:
+    patterns:
+      - "createHash\\(['\"]md5"
+      - "createHash\\(['\"]sha1"
+      - "md5\\("
+      - "sha1\\("
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const crypto = require('crypto');
+        const hash = crypto.createHash('md5').update(password).digest('hex');
+        const hash = crypto.createHash('sha1').update(password).digest('hex');
+      good: |
+        // Use bcrypt
+        const bcrypt = require('bcrypt');
+        const hash = await bcrypt.hash(password, 12);
+        const isValid = await bcrypt.compare(password, hash);
+        
+        // Or use Argon2 (recommended)
+        const argon2 = require('argon2');
+        const hash = await argon2.hash(password);
+        const isValid = await argon2.verify(hash, password);
+  
+  risks:
+    - level: critical
+      description: Passwords can be cracked in minutes with rainbow tables
+      mitigation: Use bcrypt, Argon2, or scrypt with proper work factors
+  
+  tags: [password, hashing, security, crypto, critical]
+  confidence: 0.95
+  riskScore: 90
+
+- id: sec-jwt-none-algorithm
+  name: JWT None Algorithm
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Not validating JWT algorithm allows attackers to bypass signature
+    verification by using 'none' algorithm.
+  
+  detection:
+    patterns:
+      - "jwt\\.verify.*\\{\\s*\\}"
+      - "algorithms.*\\[\\]"
+      - "ignoreExpiration.*true"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const jwt = require('jsonwebtoken');
+        // DANGEROUS: No algorithm specified
+        const decoded = jwt.verify(token, secret);
+        // DANGEROUS: Empty algorithms array
+        const decoded = jwt.verify(token, secret, { algorithms: [] });
+      good: |
+        const jwt = require('jsonwebtoken');
+        // SAFE: Explicitly specify allowed algorithms
+        const decoded = jwt.verify(token, secret, {
+          algorithms: ['HS256'],
+          issuer: 'myapp',
+          audience: 'myapp-users'
+        });
+  
+  risks:
+    - level: critical
+      description: Complete authentication bypass
+      mitigation: Always specify allowed algorithms explicitly
+  
+  tags: [jwt, authentication, security, critical]
+  confidence: 0.9
+  riskScore: 95
+
+- id: sec-session-fixation
+  name: Session Fixation
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Not regenerating session ID after authentication allows attackers
+    to hijack sessions by pre-setting session IDs.
+  
+  detection:
+    patterns:
+      - "req\\.session\\.user\\s*="
+      - "session\\.userId\\s*="
+    excludePatterns:
+      - "regenerate"
+      - "destroy"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Session ID not regenerated
+        app.post('/login', (req, res) => {
+          if (validateCredentials(req.body)) {
+            req.session.user = req.body.username;
+            res.redirect('/dashboard');
+          }
+        });
+      good: |
+        app.post('/login', (req, res) => {
+          if (validateCredentials(req.body)) {
+            // SAFE: Regenerate session before setting user
+            req.session.regenerate((err) => {
+              if (err) return res.status(500).send('Error');
+              req.session.user = req.body.username;
+              res.redirect('/dashboard');
+            });
+          }
+        });
+  
+  risks:
+    - level: high
+      description: Session hijacking, account takeover
+      mitigation: Always regenerate session ID after authentication
+  
+  tags: [session, authentication, security, hijacking]
+  confidence: 0.85
+  riskScore: 80
+
+- id: sec-broken-access-control
+  name: Broken Access Control
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Missing or inadequate authorization checks allow users to
+    access resources they shouldn't have permission to view or modify.
+  
+  detection:
+    patterns:
+      - "params\\.id.*findById"
+      - "params\\.userId.*delete"
+      - "body\\.id.*update"
+    excludePatterns:
+      - "req\\.user\\.id"
+      - "session\\.userId"
+      - "checkPermission"
+      - "authorize"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: No ownership check
+        app.delete('/api/posts/:id', async (req, res) => {
+          await Post.findByIdAndDelete(req.params.id);
+          res.json({ success: true });
+        });
+      good: |
+        app.delete('/api/posts/:id', authenticate, async (req, res) => {
+          const post = await Post.findById(req.params.id);
+          
+          // Check ownership or admin role
+          if (post.authorId !== req.user.id && !req.user.isAdmin) {
+            return res.status(403).json({ error: 'Forbidden' });
+          }
+          
+          await post.deleteOne();
+          res.json({ success: true });
+        });
+  
+  risks:
+    - level: critical
+      description: Unauthorized access to data, IDOR vulnerabilities
+      mitigation: Always verify user has permission for the resource
+  
+  tags: [authorization, access-control, idor, security, owasp-top10]
+  confidence: 0.85
+  riskScore: 90

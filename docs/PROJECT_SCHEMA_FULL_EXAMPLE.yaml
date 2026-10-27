@@ -1,0 +1,221 @@
+# PROJECT_SCHEMA.yaml - Полный пример
+
+# 🎯 Основная информация о проекте
+project:
+  name: "E-Commerce Platform"
+  version: "2.1.0"
+  description: "Multi-tenant e-commerce with AI recommendations"
+  last_updated: "2024-01-10T10:00:00Z"
+  repository: "https://github.com/company/ecommerce"
+
+# 🏗️ Архитектура
+architecture:
+  type: "microservices"
+  deployment: "kubernetes"
+  
+  frontend:
+    framework: "Next.js 14"
+    ui_library: "shadcn/ui"
+    state_management: "Zustand"
+    styling: "Tailwind CSS"
+    
+  backend:
+    language: "TypeScript"
+    runtime: "Node.js 20"
+    framework: "NestJS"
+    
+  infrastructure:
+    cloud: "AWS"
+    ci_cd: "GitHub Actions"
+    monitoring: "Datadog"
+    
+# 💾 База данных
+database:
+  primary:
+    type: "PostgreSQL 15"
+    name: "ecommerce_prod"
+    host: "RDS endpoint"
+    
+  tables:
+    users:
+      columns:
+        - id: "uuid PRIMARY KEY DEFAULT gen_random_uuid()"
+        - email: "varchar(255) UNIQUE NOT NULL"
+        - password_hash: "varchar(255) NOT NULL"
+        - role: "enum('customer', 'vendor', 'admin')"
+        - created_at: "timestamp DEFAULT NOW()"
+      indexes:
+        - "btree(email)"
+        - "btree(created_at)"
+      relationships:
+        - "has_many: orders"
+        - "has_many: reviews"
+        
+    products:
+      columns:
+        - id: "uuid PRIMARY KEY"
+        - vendor_id: "uuid REFERENCES users(id)"
+        - name: "varchar(255) NOT NULL"
+        - price: "decimal(10,2) NOT NULL"
+        - stock: "integer DEFAULT 0"
+      indexes:
+        - "btree(vendor_id)"
+        - "gin(name gin_trgm_ops)" # для поиска
+        
+  cache:
+    type: "Redis 7"
+    purpose: "Session storage, product cache"
+    
+  queue:
+    type: "BullMQ"
+    database: "Redis"
+
+# 🔌 API структура
+api:
+  version: "v1"
+  base_url: "https://api.example.com"
+  authentication: "JWT + Refresh tokens"
+  
+  endpoints:
+    auth:
+      - "POST /auth/register"
+      - "POST /auth/login"
+      - "POST /auth/refresh"
+      - "POST /auth/logout"
+      
+    users:
+      - "GET /users/profile"
+      - "PUT /users/profile"
+      - "DELETE /users/:id (admin only)"
+      
+    products:
+      - "GET /products (paginated, filterable)"
+      - "GET /products/:id"
+      - "POST /products (vendor only)"
+      - "PUT /products/:id (vendor only)"
+      - "DELETE /products/:id (vendor only)"
+      
+    orders:
+      - "POST /orders/checkout"
+      - "GET /orders/history"
+      - "GET /orders/:id"
+      - "PUT /orders/:id/status (vendor only)"
+      
+  webhooks:
+    - "POST /webhooks/stripe"
+    - "POST /webhooks/shipping"
+
+# 🔐 Безопасность
+security:
+  authentication:
+    method: "JWT"
+    token_expiry: "15m"
+    refresh_expiry: "7d"
+    
+  authorization:
+    type: "RBAC"
+    roles: ["customer", "vendor", "admin"]
+    
+  encryption:
+    passwords: "bcrypt (rounds: 12)"
+    data_at_rest: "AES-256"
+    
+  compliance:
+    - "GDPR"
+    - "PCI DSS"
+
+# 🚀 Деплой и окружения
+environments:
+  development:
+    url: "http://localhost:3000"
+    database: "ecommerce_dev"
+    
+  staging:
+    url: "https://staging.example.com"
+    database: "ecommerce_staging"
+    
+  production:
+    url: "https://example.com"
+    database: "ecommerce_prod"
+    cdn: "CloudFront"
+
+# 📦 Ключевые зависимости
+dependencies:
+  critical:
+    - "@nestjs/core: ^10.0.0"
+    - "next: ^14.0.0"
+    - "prisma: ^5.0.0"
+    - "stripe: ^14.0.0"
+    
+  integrations:
+    - "Stripe: payments"
+    - "SendGrid: emails"
+    - "Twilio: SMS"
+    - "S3: file storage"
+
+# 🔄 Бизнес-логика
+business_logic:
+  order_flow:
+    - "Cart → Checkout → Payment → Fulfillment → Delivery"
+    
+  pricing:
+    - "Base price + Tax + Shipping"
+    - "Discounts: percentage or fixed"
+    
+  inventory:
+    - "Real-time stock tracking"
+    - "Low stock alerts at 10 units"
+
+# 📊 Метрики и мониторинг
+monitoring:
+  key_metrics:
+    - "API response time < 200ms"
+    - "Database query time < 50ms"
+    - "Uptime > 99.9%"
+    
+  alerts:
+    - "Error rate > 1%"
+    - "Memory usage > 80%"
+    - "Failed payments > 5/hour"
+
+# 🗺️ Roadmap (текущие задачи)
+current_tasks:
+  in_progress:
+    - "AI recommendations engine"
+    - "Mobile app (React Native)"
+    
+  planned:
+    - "Multi-language support"
+    - "B2B marketplace features"
+
+# ⚠️ Известные проблемы
+known_issues:
+  - issue: "Slow search on 1M+ products"
+    solution: "Implement Elasticsearch"
+    priority: "high"
+    
+  - issue: "Cart abandonment 45%"
+    solution: "Add save for later + email reminders"
+    priority: "medium"
+
+# 📝 Соглашения
+conventions:
+  naming:
+    - "Tables: snake_case plural"
+    - "API: kebab-case"
+    - "Components: PascalCase"
+    
+  git:
+    - "Branch: feature/description"
+    - "Commit: type(scope): message"
+    
+  code_style:
+    - "ESLint + Prettier"
+    - "Pre-commit hooks"
+
+# 🔗 Важные ссылки
+resources:
+  documentation: "https://docs.example.com"
+  api_docs: "https://api.example.com/docs"
+  design_system: "https://figma.com/..."
+  staging_db: "postgres://staging..."

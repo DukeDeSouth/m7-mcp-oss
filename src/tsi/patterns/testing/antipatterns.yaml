@@ -1,0 +1,356 @@
+# Testing Anti-Patterns
+# Category: Testing | Type: Antipattern
+
+- id: test-no-assertions
+  name: Tests Without Assertions
+  technology: javascript
+  category: testing
+  type: antipattern
+  description: |
+    Tests that don't assert anything always pass but prove nothing.
+    They give false confidence in code quality.
+  
+  detection:
+    patterns:
+      - "it\\(['\"].*['\"],.*\\{[^}]*\\}\\)"
+      - "test\\(['\"].*['\"],.*\\(\\).*\\{.*\\}\\)"
+    excludePatterns:
+      - "expect"
+      - "assert"
+      - "should"
+      - "toThrow"
+    fileTypes: [js, ts, spec.js, spec.ts, test.js, test.ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // USELESS: No assertions
+        it('should create user', async () => {
+          const user = await createUser({ name: 'Test' });
+          console.log(user);  // Just logging, not testing
+        });
+        
+        it('should process order', () => {
+          processOrder(testOrder);
+          // Test ends without checking anything
+        });
+      good: |
+        // USEFUL: Clear assertions
+        it('should create user with given name', async () => {
+          const user = await createUser({ name: 'Test' });
+          
+          expect(user).toBeDefined();
+          expect(user.id).toBeDefined();
+          expect(user.name).toBe('Test');
+          expect(user.createdAt).toBeInstanceOf(Date);
+        });
+        
+        it('should throw on invalid order', () => {
+          expect(() => processOrder(null)).toThrow('Order is required');
+        });
+  
+  risks:
+    - level: high
+      description: False confidence, bugs slip through
+      mitigation: Every test must have explicit assertions
+  
+  tags: [testing, assertions, quality]
+  confidence: 0.85
+  riskScore: 60
+
+- id: test-flaky
+  name: Flaky Tests (Time-dependent)
+  technology: javascript
+  category: testing
+  type: antipattern
+  description: |
+    Tests that depend on current time or timeouts are flaky and
+    can fail randomly, eroding trust in the test suite.
+  
+  detection:
+    patterns:
+      - "new Date\\(\\)"
+      - "Date\\.now\\(\\)"
+      - "setTimeout.*expect"
+      - "sleep.*assert"
+    fileTypes: [spec.js, spec.ts, test.js, test.ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // FLAKY: Depends on current time
+        it('should expire after 24 hours', () => {
+          const token = createToken();
+          expect(token.expiresAt.getTime()).toBeGreaterThan(Date.now());
+        });
+        
+        // FLAKY: Race condition with setTimeout
+        it('should debounce calls', (done) => {
+          let count = 0;
+          const debounced = debounce(() => count++, 100);
+          debounced();
+          debounced();
+          setTimeout(() => {
+            expect(count).toBe(1);
+            done();
+          }, 150);  // May fail under load
+        });
+      good: |
+        // STABLE: Mock time
+        import { jest } from '@jest/globals';
+        
+        it('should expire after 24 hours', () => {
+          const mockDate = new Date('2024-01-01T12:00:00Z');
+          jest.useFakeTimers().setSystemTime(mockDate);
+          
+          const token = createToken();
+          
+          expect(token.expiresAt).toEqual(
+            new Date('2024-01-02T12:00:00Z')
+          );
+          
+          jest.useRealTimers();
+        });
+        
+        // STABLE: Use fake timers
+        it('should debounce calls', () => {
+          jest.useFakeTimers();
+          
+          let count = 0;
+          const debounced = debounce(() => count++, 100);
+          
+          debounced();
+          debounced();
+          
+          jest.advanceTimersByTime(100);
+          
+          expect(count).toBe(1);
+        });
+  
+  risks:
+    - level: high
+      description: Intermittent failures, lost developer trust
+      mitigation: Mock time, use fake timers
+  
+  tags: [testing, flaky, time, timers]
+  confidence: 0.85
+  riskScore: 65
+
+- id: test-implementation-detail
+  name: Testing Implementation Details
+  technology: javascript
+  category: testing
+  type: antipattern
+  description: |
+    Tests that verify internal implementation rather than behavior
+    are brittle and break with refactoring.
+  
+  detection:
+    patterns:
+      - "expect.*\\.calls"
+      - "spy.*toHaveBeenCalledTimes"
+      - "mock.*\\.mock\\.calls"
+    fileTypes: [spec.js, spec.ts, test.js, test.ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // BRITTLE: Tests internal implementation
+        it('should create user', async () => {
+          const dbSpy = jest.spyOn(db, 'insert');
+          const emailSpy = jest.spyOn(emailService, 'send');
+          
+          await createUser({ email: 'test@example.com' });
+          
+          expect(dbSpy).toHaveBeenCalledTimes(1);
+          expect(emailSpy).toHaveBeenCalledWith(
+            'test@example.com',
+            expect.any(String)
+          );
+          // Breaks if we batch inserts or change email timing
+        });
+      good: |
+        // ROBUST: Tests observable behavior
+        it('should create user and send welcome email', async () => {
+          const result = await createUser({ email: 'test@example.com' });
+          
+          // Verify user was created
+          expect(result.user.email).toBe('test@example.com');
+          expect(result.user.id).toBeDefined();
+          
+          // Verify user exists in database
+          const dbUser = await db.users.findById(result.user.id);
+          expect(dbUser).toBeDefined();
+          
+          // Verify email was queued (check side effect, not how)
+          const emails = await getQueuedEmails();
+          expect(emails).toContainEqual(
+            expect.objectContaining({
+              to: 'test@example.com',
+              type: 'welcome'
+            })
+          );
+        });
+  
+  risks:
+    - level: medium
+      description: Tests break on refactoring, high maintenance
+      mitigation: Test behavior and outcomes, not implementation
+  
+  tags: [testing, implementation, behavior, refactoring]
+  confidence: 0.75
+  riskScore: 50
+
+- id: test-shared-state
+  name: Shared State Between Tests
+  technology: javascript
+  category: testing
+  type: antipattern
+  description: |
+    Tests that share mutable state can affect each other,
+    causing failures that depend on test execution order.
+  
+  detection:
+    patterns:
+      - "let.*=.*\\[\\]"
+      - "let.*=.*\\{\\}"
+      - "beforeAll.*=.*new"
+    excludePatterns:
+      - "beforeEach"
+      - "const"
+    fileTypes: [spec.js, spec.ts, test.js, test.ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SHARED STATE: Tests affect each other
+        let users = [];
+        
+        beforeAll(() => {
+          users.push({ id: 1, name: 'Test' });
+        });
+        
+        it('should find user', () => {
+          const user = users.find(u => u.id === 1);
+          expect(user.name).toBe('Test');
+        });
+        
+        it('should add user', () => {
+          users.push({ id: 2, name: 'New' });
+          expect(users).toHaveLength(2);  // Depends on previous test
+        });
+      good: |
+        // ISOLATED: Each test has fresh state
+        describe('UserService', () => {
+          let users: User[];
+          let userService: UserService;
+          
+          beforeEach(() => {
+            // Fresh state for each test
+            users = [{ id: 1, name: 'Test' }];
+            userService = new UserService(users);
+          });
+          
+          it('should find user', () => {
+            const user = userService.find(1);
+            expect(user.name).toBe('Test');
+          });
+          
+          it('should add user', () => {
+            userService.add({ id: 2, name: 'New' });
+            expect(userService.count()).toBe(2);
+          });
+        });
+  
+  risks:
+    - level: high
+      description: Test order dependence, mysterious failures
+      mitigation: Reset state in beforeEach, use fresh fixtures
+  
+  tags: [testing, state, isolation, beforeEach]
+  confidence: 0.85
+  riskScore: 60
+
+- id: test-missing-edge-cases
+  name: Missing Edge Case Tests
+  technology: javascript
+  category: testing
+  type: antipattern
+  description: |
+    Testing only the happy path misses bugs that occur with edge cases
+    like empty arrays, null values, or boundary conditions.
+  
+  detection:
+    patterns:
+      - "it\\(['\"]should.*['\"],"
+    excludePatterns:
+      - "null"
+      - "empty"
+      - "undefined"
+      - "error"
+      - "invalid"
+      - "edge"
+      - "boundary"
+    fileTypes: [spec.js, spec.ts, test.js, test.ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // INCOMPLETE: Only happy path
+        describe('calculateTotal', () => {
+          it('should calculate total for items', () => {
+            const total = calculateTotal([
+              { price: 10, quantity: 2 },
+              { price: 5, quantity: 3 }
+            ]);
+            expect(total).toBe(35);
+          });
+        });
+      good: |
+        // COMPLETE: Edge cases covered
+        describe('calculateTotal', () => {
+          it('should calculate total for items', () => {
+            const total = calculateTotal([
+              { price: 10, quantity: 2 },
+              { price: 5, quantity: 3 }
+            ]);
+            expect(total).toBe(35);
+          });
+          
+          it('should return 0 for empty array', () => {
+            expect(calculateTotal([])).toBe(0);
+          });
+          
+          it('should handle null input', () => {
+            expect(calculateTotal(null)).toBe(0);
+          });
+          
+          it('should handle items with zero quantity', () => {
+            const total = calculateTotal([
+              { price: 10, quantity: 0 }
+            ]);
+            expect(total).toBe(0);
+          });
+          
+          it('should handle decimal prices', () => {
+            const total = calculateTotal([
+              { price: 10.99, quantity: 3 }
+            ]);
+            expect(total).toBeCloseTo(32.97);
+          });
+          
+          it('should throw for negative quantity', () => {
+            expect(() => calculateTotal([
+              { price: 10, quantity: -1 }
+            ])).toThrow('Quantity must be positive');
+          });
+        });
+  
+  risks:
+    - level: medium
+      description: Bugs with edge cases, production errors
+      mitigation: Test null, empty, boundary, and error cases
+  
+  tags: [testing, edge-cases, coverage, quality]
+  confidence: 0.75
+  riskScore: 55

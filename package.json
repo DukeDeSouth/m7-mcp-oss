@@ -1,0 +1,74 @@
+{
+  "name": "@m7/mcp-server",
+  "version": "3.18.0",
+  "description": "M7 MCP Server - methodology-enforcing MCP server for AI coding agents: 7-phase cycle with reflection gates, persistent memory, fog of war, Hive multi-agent",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "m7-mcp": "./dist/index.js",
+    "@m7/mcp-server": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "test": "bash scripts/run-tests.sh"
+  },
+  "keywords": [
+    "mcp",
+    "m7",
+    "methodology",
+    "orchestration",
+    "memory",
+    "patterns",
+    "enforcement",
+    "anti-chaos",
+    "code-quality",
+    "semantic-search",
+    "vector-database",
+    "chromadb",
+    "embeddings",
+    "ai-assistant"
+  ],
+  "author": "DukeDeSouth",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.60.0",
+    "@modelcontextprotocol/sdk": "^1.17.2",
+    "@types/ws": "^8.18.1",
+    "better-sqlite3": "^12.6.2",
+    "chokidar": "^3.5.3",
+    "chromadb": "^3.1.6",
+    "chromadb-default-embed": "^2.14.0",
+    "diff": "^7.0.0",
+    "dotenv": "^17.2.3",
+    "js-yaml": "^4.1.0",
+    "lodash.debounce": "^4.0.8",
+    "lru-cache": "^11.0.0",
+    "openai": "^5.16.0",
+    "p-queue": "^8.0.1",
+    "semver": "^7.6.3",
+    "ts-morph": "^27.0.2",
+    "ws": "^8.18.3",
+    "yaml": "^2.8.2",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff": "^7.0.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/json-schema": "^7.0.15",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.3"
+  },
+  "files": [
+    "dist/**/*",
+    "src/tsi/patterns/**/*",
+    "config/**/*",
+    "templates/**/*",
+    "workflows/**/*",
+    "README.md",
+    "LICENSE"
+  ]
+}

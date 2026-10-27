@@ -1,0 +1,139 @@
+# Good Testing Practices
+# Category: Testing | Type: Pattern
+
+- id: test-arrange-act-assert
+  name: Arrange-Act-Assert Pattern
+  technology: javascript
+  category: testing
+  type: pattern
+  description: |
+    Structure tests with clear Arrange, Act, Assert sections
+    for readability and maintainability.
+  
+  examples:
+    - language: javascript
+      good: |
+        it('should apply discount to order total', () => {
+          // Arrange
+          const order = new Order([
+            { product: 'Widget', price: 100, quantity: 2 }
+          ]);
+          const discount = new PercentDiscount(10);
+          
+          // Act
+          order.applyDiscount(discount);
+          
+          // Assert
+          expect(order.total).toBe(180);
+          expect(order.discountApplied).toBe(20);
+        });
+  
+  risks:
+    - level: low
+      description: Clear test structure improves maintainability
+      mitigation: Always use AAA pattern
+  
+  tags: [testing, pattern, aaa, structure]
+  confidence: 0.9
+  riskScore: 10
+
+- id: test-descriptive-names
+  name: Descriptive Test Names
+  technology: javascript
+  category: testing
+  type: pattern
+  description: |
+    Test names should describe the scenario and expected outcome,
+    serving as documentation for the code's behavior.
+  
+  examples:
+    - language: javascript
+      bad: |
+        it('works', () => { /* ... */ });
+        it('test user', () => { /* ... */ });
+        it('should work correctly', () => { /* ... */ });
+      good: |
+        it('should return empty array when no users match filter', () => { /* ... */ });
+        it('should throw AuthError when password is incorrect', () => { /* ... */ });
+        it('should apply 15% discount for orders over $100', () => { /* ... */ });
+        
+        // BDD style
+        describe('UserService', () => {
+          describe('when creating a user', () => {
+            describe('with valid data', () => {
+              it('creates the user and returns the id', () => { /* ... */ });
+              it('sends a welcome email', () => { /* ... */ });
+            });
+            
+            describe('with duplicate email', () => {
+              it('throws DuplicateEmailError', () => { /* ... */ });
+            });
+          });
+        });
+  
+  risks:
+    - level: low
+      description: Good names serve as documentation
+      mitigation: Name should describe scenario and outcome
+  
+  tags: [testing, naming, documentation]
+  confidence: 0.9
+  riskScore: 10
+
+- id: test-factory-pattern
+  name: Test Data Factory Pattern
+  technology: javascript
+  category: testing
+  type: pattern
+  description: |
+    Use factory functions to create test data with sensible defaults,
+    making tests cleaner and easier to maintain.
+  
+  examples:
+    - language: typescript
+      good: |
+        // factories.ts
+        export const createUser = (overrides: Partial<User> = {}): User => ({
+          id: 'test-user-id',
+          name: 'Test User',
+          email: 'test@example.com',
+          role: 'user',
+          createdAt: new Date('2024-01-01'),
+          ...overrides
+        });
+        
+        export const createOrder = (overrides: Partial<Order> = {}): Order => ({
+          id: 'test-order-id',
+          userId: 'test-user-id',
+          items: [createOrderItem()],
+          status: 'pending',
+          total: 100,
+          ...overrides
+        });
+        
+        // In tests
+        it('should allow admin to cancel any order', () => {
+          const admin = createUser({ role: 'admin' });
+          const order = createOrder({ status: 'pending' });
+          
+          const result = orderService.cancel(order, admin);
+          
+          expect(result.status).toBe('cancelled');
+        });
+        
+        it('should prevent user from cancelling shipped order', () => {
+          const user = createUser();
+          const order = createOrder({ status: 'shipped' });
+          
+          expect(() => orderService.cancel(order, user))
+            .toThrow('Cannot cancel shipped order');
+        });
+  
+  risks:
+    - level: low
+      description: Factories reduce duplication and improve clarity
+      mitigation: Use factories for complex test data
+  
+  tags: [testing, factory, fixtures, maintenance]
+  confidence: 0.85
+  riskScore: 10

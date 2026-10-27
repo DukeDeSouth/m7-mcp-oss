@@ -1,0 +1,53 @@
+{
+  "name": "m7-mcp-server",
+  "version": "3.18.0",
+  "description": "M7 MCP Server - methodology-enforcing MCP server for AI coding agents",
+  "main": "dist/index.js",
+  "tools": [
+    "mcp_m7_analyze_task",
+    "mcp_m7_memory",
+    "mcp_m7_session",
+    "mcp_m7_validate",
+    "mcp_m7_scope",
+    "mcp_m7_init_project",
+    "mcp_m7_check_errors",
+    "mcp_m7_create_structure",
+    "mcp_m7_schema",
+    "mcp_m7_project_index",
+    "mcp_m7_check_tech_stack",
+    "mcp_m7_get_patterns",
+    "mcp_m7_validate_implementation",
+    "mcp_m7_console",
+    "mcp_m7_contracts",
+    "mcp_m7_impact",
+    "mcp_m7_test_tool",
+    "mcp_m7_hive_coordinator",
+    "mcp_m7_knowledge_hub",
+    "mcp_m7_safety_verify",
+    "mcp_m7_telemetry",
+    "mcp_m7_style_guardian",
+    "mcp_m7_error_database",
+    "mcp_m7_knowledge_graph",
+    "mcp_m7_arch_advisor",
+    "mcp_m7_cross_session",
+    "mcp_m7_visualizer",
+    "mcp_m7_cycle",
+    "mcp_m7_hive_history",
+    "mcp_m7_dcce",
+    "mcp_m7_mesh",
+    "mcp_m7_devops",
+    "mcp_m7_warmup",
+    "mcp_m7_doctor",
+    "mcp_m7_task_transfer",
+    "mcp_m7_task_graph",
+    "mcp_m7_repentance",
+    "mcp_m7_litany"
+  ],
+  "resources": ["memory", "patterns", "errors"],
+  "config": {
+    "stdio": true,
+    "env": {
+      "NODE_ENV": "production"
+    }
+  }
+}

@@ -1,0 +1,184 @@
+# Cryptography Vulnerabilities
+# Category: Security | Type: Antipattern
+
+- id: sec-weak-random
+  name: Weak Random Number Generation
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Using Math.random() for security-sensitive operations is dangerous
+    as it's not cryptographically secure.
+  
+  detection:
+    patterns:
+      - "Math\\.random\\(\\).*token"
+      - "Math\\.random\\(\\).*password"
+      - "Math\\.random\\(\\).*key"
+      - "Math\\.random\\(\\).*secret"
+      - "Math\\.random\\(\\).*id"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Predictable tokens
+        const token = Math.random().toString(36).substr(2);
+        const resetCode = Math.floor(Math.random() * 1000000);
+      good: |
+        const crypto = require('crypto');
+        
+        // SAFE: Cryptographically secure random
+        const token = crypto.randomBytes(32).toString('hex');
+        const resetCode = crypto.randomInt(100000, 999999);
+        
+        // SAFE: Using uuid for IDs
+        const { v4: uuidv4 } = require('uuid');
+        const sessionId = uuidv4();
+  
+  risks:
+    - level: high
+      description: Predictable tokens can be guessed by attackers
+      mitigation: Use crypto.randomBytes() or crypto.randomInt()
+  
+  tags: [random, crypto, security, tokens]
+  confidence: 0.9
+  riskScore: 80
+
+- id: sec-weak-encryption
+  name: Weak Encryption Algorithm
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Using deprecated encryption algorithms like DES, 3DES, or RC4
+    provides inadequate security against modern attacks.
+  
+  detection:
+    patterns:
+      - "createCipher\\(['\"]des"
+      - "createCipher\\(['\"]rc4"
+      - "createCipher\\(['\"]blowfish"
+      - "createCipheriv\\(['\"]des"
+      - "aes-128-ecb"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const crypto = require('crypto');
+        // DANGEROUS: Weak algorithms
+        const cipher = crypto.createCipher('des', key);
+        const cipher = crypto.createCipheriv('aes-128-ecb', key, '');
+      good: |
+        const crypto = require('crypto');
+        
+        // SAFE: Use AES-256-GCM (authenticated encryption)
+        const key = crypto.randomBytes(32);
+        const iv = crypto.randomBytes(16);
+        
+        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+        cipher.setAAD(Buffer.from('additional data'));
+        
+        let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        const tag = cipher.getAuthTag();
+  
+  risks:
+    - level: high
+      description: Encrypted data can be decrypted by attackers
+      mitigation: Use AES-256-GCM or ChaCha20-Poly1305
+  
+  tags: [encryption, crypto, security, deprecated]
+  confidence: 0.95
+  riskScore: 85
+
+- id: sec-no-tls-verify
+  name: Disabled TLS Verification
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Disabling TLS certificate verification allows man-in-the-middle attacks.
+  
+  detection:
+    patterns:
+      - "rejectUnauthorized.*false"
+      - "NODE_TLS_REJECT_UNAUTHORIZED.*0"
+      - "strictSSL.*false"
+      - "secure.*false.*ssl"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Disables certificate verification
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+        
+        const https = require('https');
+        const agent = new https.Agent({
+          rejectUnauthorized: false
+        });
+      good: |
+        // SAFE: Use proper certificates
+        const https = require('https');
+        const fs = require('fs');
+        
+        const agent = new https.Agent({
+          ca: fs.readFileSync('/path/to/ca-cert.pem'),
+          rejectUnauthorized: true
+        });
+        
+        // For development, use mkcert or similar
+  
+  risks:
+    - level: critical
+      description: Man-in-the-middle attacks, credential theft
+      mitigation: Always verify TLS certificates, use proper CA certs
+  
+  tags: [tls, ssl, crypto, mitm, security]
+  confidence: 0.95
+  riskScore: 90
+
+- id: sec-insecure-cookie
+  name: Insecure Cookie Configuration
+  technology: javascript
+  category: security
+  type: antipattern
+  description: |
+    Cookies without proper security flags (Secure, HttpOnly, SameSite)
+    are vulnerable to theft and CSRF attacks.
+  
+  detection:
+    patterns:
+      - "cookie.*httpOnly.*false"
+      - "cookie.*secure.*false"
+      - "Set-Cookie(?!.*HttpOnly)"
+      - "Set-Cookie(?!.*Secure)"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // DANGEROUS: Missing security flags
+        res.cookie('session', token);
+        res.cookie('auth', token, { httpOnly: false });
+      good: |
+        // SAFE: All security flags enabled
+        res.cookie('session', token, {
+          httpOnly: true,    // Prevents XSS access
+          secure: true,      // HTTPS only
+          sameSite: 'strict', // CSRF protection
+          maxAge: 3600000,   // 1 hour
+          path: '/',
+          domain: '.example.com'
+        });
+  
+  risks:
+    - level: high
+      description: Cookie theft via XSS, CSRF attacks
+      mitigation: Set httpOnly, secure, and sameSite flags
+  
+  tags: [cookies, xss, csrf, security, session]
+  confidence: 0.9
+  riskScore: 75

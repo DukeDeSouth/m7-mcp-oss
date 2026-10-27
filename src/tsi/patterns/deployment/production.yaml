@@ -1,0 +1,254 @@
+# Production Deployment Anti-Patterns
+# Category: Deployment | Type: Antipattern
+
+- id: deploy-no-health-check
+  name: Missing Health Check
+  technology: javascript
+  category: deployment
+  type: antipattern
+  description: |
+    Without health checks, orchestrators can't detect unhealthy instances,
+    leading to traffic being sent to broken services.
+  
+  detection:
+    patterns:
+      - "app\\.listen"
+    excludePatterns:
+      - "/health"
+      - "/healthz"
+      - "/ready"
+      - "healthcheck"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // NO HEALTH CHECK
+        const app = express();
+        app.get('/api/users', getUsers);
+        app.listen(3000);
+      good: |
+        const app = express();
+        
+        // Liveness check - is the process running?
+        app.get('/health/live', (req, res) => {
+          res.status(200).json({ status: 'ok' });
+        });
+        
+        // Readiness check - can the service handle traffic?
+        app.get('/health/ready', async (req, res) => {
+          try {
+            // Check dependencies
+            await db.query('SELECT 1');
+            await redis.ping();
+            res.status(200).json({ 
+              status: 'ok',
+              checks: {
+                database: 'connected',
+                redis: 'connected'
+              }
+            });
+          } catch (error) {
+            res.status(503).json({ 
+              status: 'unhealthy',
+              error: error.message 
+            });
+          }
+        });
+        
+        app.get('/api/users', getUsers);
+        app.listen(3000);
+  
+  risks:
+    - level: high
+      description: Traffic to unhealthy instances, cascading failures
+      mitigation: Implement liveness and readiness endpoints
+  
+  tags: [health-check, kubernetes, production, monitoring]
+  confidence: 0.85
+  riskScore: 70
+
+- id: deploy-no-graceful-shutdown
+  name: Missing Graceful Shutdown
+  technology: nodejs
+  category: deployment
+  type: antipattern
+  description: |
+    Not handling shutdown signals causes in-flight requests to be dropped
+    during deployments, leading to errors and data loss.
+  
+  detection:
+    patterns:
+      - "app\\.listen"
+    excludePatterns:
+      - "SIGTERM"
+      - "SIGINT"
+      - "graceful"
+      - "shutdown"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const server = app.listen(3000, () => {
+          console.log('Server running');
+        });
+        // Process killed immediately on SIGTERM
+      good: |
+        const server = app.listen(3000, () => {
+          console.log('Server running');
+        });
+        
+        // Graceful shutdown
+        const shutdown = async (signal) => {
+          console.log(`${signal} received, shutting down...`);
+          
+          // Stop accepting new connections
+          server.close(async () => {
+            console.log('HTTP server closed');
+            
+            // Close database connections
+            await db.close();
+            await redis.quit();
+            
+            console.log('Cleanup complete');
+            process.exit(0);
+          });
+          
+          // Force exit if graceful shutdown takes too long
+          setTimeout(() => {
+            console.error('Forced shutdown after timeout');
+            process.exit(1);
+          }, 30000);
+        };
+        
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => shutdown('SIGINT'));
+  
+  risks:
+    - level: high
+      description: Dropped requests, data loss during deployments
+      mitigation: Handle SIGTERM/SIGINT, drain connections
+  
+  tags: [graceful-shutdown, deployment, nodejs, kubernetes]
+  confidence: 0.85
+  riskScore: 65
+
+- id: deploy-env-in-code
+  name: Environment-Specific Code
+  technology: javascript
+  category: deployment
+  type: antipattern
+  description: |
+    Hardcoding environment-specific behavior in code requires code changes
+    for different environments and increases deployment risk.
+  
+  detection:
+    patterns:
+      - "if.*NODE_ENV.*production"
+      - "if.*production"
+      - "process\\.env\\.NODE_ENV.*\\?"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // Environment-specific behavior in code
+        if (process.env.NODE_ENV === 'production') {
+          app.use(helmet());
+          logger.level = 'warn';
+          db.connect(prodConfig);
+        } else {
+          logger.level = 'debug';
+          db.connect(devConfig);
+        }
+      good: |
+        // Configuration-driven behavior
+        // config/index.ts
+        export const config = {
+          logLevel: process.env.LOG_LEVEL || 'info',
+          db: {
+            host: process.env.DB_HOST,
+            port: parseInt(process.env.DB_PORT || '5432'),
+          },
+          security: {
+            helmet: process.env.ENABLE_HELMET !== 'false',
+            rateLimit: parseInt(process.env.RATE_LIMIT || '100')
+          }
+        };
+        
+        // app.ts - no environment checks
+        if (config.security.helmet) {
+          app.use(helmet());
+        }
+        logger.level = config.logLevel;
+        db.connect(config.db);
+  
+  risks:
+    - level: medium
+      description: Code changes for environment differences
+      mitigation: Use environment variables for all config
+  
+  tags: [configuration, environment, deployment]
+  confidence: 0.8
+  riskScore: 50
+
+- id: deploy-no-logging
+  name: Insufficient Logging
+  technology: javascript
+  category: deployment
+  type: antipattern
+  description: |
+    Insufficient or unstructured logging makes debugging production
+    issues nearly impossible.
+  
+  detection:
+    patterns:
+      - "console\\.log"
+      - "catch.*\\{\\s*\\}"
+    excludePatterns:
+      - "logger"
+      - "winston"
+      - "pino"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        try {
+          await processOrder(order);
+        } catch (error) {
+          console.log('Error:', error);  // No context, lost in logs
+        }
+      good: |
+        import pino from 'pino';
+        
+        const logger = pino({
+          level: process.env.LOG_LEVEL || 'info',
+          formatters: {
+            level: (label) => ({ level: label })
+          }
+        });
+        
+        try {
+          logger.info({ orderId: order.id, userId: user.id }, 'Processing order');
+          await processOrder(order);
+          logger.info({ orderId: order.id }, 'Order processed successfully');
+        } catch (error) {
+          logger.error({
+            orderId: order.id,
+            userId: user.id,
+            error: error.message,
+            stack: error.stack
+          }, 'Failed to process order');
+          throw error;
+        }
+  
+  risks:
+    - level: high
+      description: Can't debug production issues
+      mitigation: Use structured logging with context
+  
+  tags: [logging, debugging, production, monitoring]
+  confidence: 0.85
+  riskScore: 60

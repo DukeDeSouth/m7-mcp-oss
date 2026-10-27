@@ -1,0 +1,230 @@
+# Node.js Performance Anti-Patterns
+# Category: Performance | Type: Antipattern
+
+- id: perf-sync-fs
+  name: Synchronous File Operations
+  technology: nodejs
+  category: performance
+  type: antipattern
+  description: |
+    Using synchronous fs methods blocks the event loop,
+    preventing Node.js from handling other requests.
+  
+  detection:
+    patterns:
+      - "readFileSync"
+      - "writeFileSync"
+      - "readdirSync"
+      - "statSync"
+      - "existsSync"
+    excludePatterns:
+      - "startup"
+      - "init"
+      - "config"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // BLOCKING: Stops entire server
+        app.get('/file/:name', (req, res) => {
+          const content = fs.readFileSync(`./files/${req.params.name}`);
+          res.send(content);
+        });
+      good: |
+        // NON-BLOCKING: Uses async
+        app.get('/file/:name', async (req, res) => {
+          const content = await fs.promises.readFile(`./files/${req.params.name}`);
+          res.send(content);
+        });
+        
+        // Or use callback-based
+        app.get('/file/:name', (req, res) => {
+          fs.readFile(`./files/${req.params.name}`, (err, content) => {
+            if (err) return res.status(500).send('Error');
+            res.send(content);
+          });
+        });
+        
+        // For streaming large files
+        app.get('/file/:name', (req, res) => {
+          fs.createReadStream(`./files/${req.params.name}`)
+            .pipe(res);
+        });
+  
+  risks:
+    - level: high
+      description: Event loop blocking, request timeouts, poor concurrency
+      mitigation: Use async/await or streaming for file operations
+  
+  tags: [nodejs, performance, sync, blocking, event-loop]
+  confidence: 0.95
+  riskScore: 75
+
+- id: perf-no-connection-pool
+  name: Missing Database Connection Pool
+  technology: nodejs
+  category: performance
+  type: antipattern
+  description: |
+    Creating new database connections for each request is slow
+    and exhausts database connection limits.
+  
+  detection:
+    patterns:
+      - "createConnection.*req"
+      - "new.*Connection.*async"
+      - "connect\\(\\).*app\\.get"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SLOW: New connection per request
+        app.get('/users', async (req, res) => {
+          const connection = await mysql.createConnection(config);
+          const [rows] = await connection.execute('SELECT * FROM users');
+          await connection.end();
+          res.json(rows);
+        });
+      good: |
+        // FAST: Use connection pool
+        const pool = mysql.createPool({
+          host: 'localhost',
+          user: 'root',
+          database: 'app',
+          connectionLimit: 10,
+          waitForConnections: true,
+          queueLimit: 0
+        });
+        
+        app.get('/users', async (req, res) => {
+          const [rows] = await pool.execute('SELECT * FROM users');
+          res.json(rows);
+        });
+        
+        // Mongoose (auto-pooling)
+        mongoose.connect(uri, { maxPoolSize: 10 });
+  
+  risks:
+    - level: high
+      description: Connection exhaustion, slow requests, database overload
+      mitigation: Always use connection pooling
+  
+  tags: [nodejs, database, pool, performance, connections]
+  confidence: 0.9
+  riskScore: 70
+
+- id: perf-memory-leak-listener
+  name: Event Listener Memory Leak
+  technology: nodejs
+  category: performance
+  type: antipattern
+  description: |
+    Adding event listeners without cleanup causes memory leaks.
+    Common with EventEmitter and WebSocket handlers.
+  
+  detection:
+    patterns:
+      - "\\.on\\(['\"].*['\"],.*function"
+      - "addEventListener\\("
+    excludePatterns:
+      - "\\.off\\("
+      - "removeEventListener"
+      - "\\.once\\("
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // LEAK: Listeners accumulate
+        class Handler {
+          constructor(emitter) {
+            emitter.on('data', this.handleData.bind(this));
+          }
+        }
+        // Each new Handler adds another listener
+      good: |
+        class Handler {
+          constructor(emitter) {
+            this.emitter = emitter;
+            this.boundHandler = this.handleData.bind(this);
+            emitter.on('data', this.boundHandler);
+          }
+          
+          destroy() {
+            this.emitter.off('data', this.boundHandler);
+          }
+        }
+        
+        // Or use .once for one-time handlers
+        emitter.once('data', handleFirstData);
+        
+        // Check for listener warnings
+        emitter.setMaxListeners(10);
+  
+  risks:
+    - level: high
+      description: Memory growth, eventual OOM crash
+      mitigation: Always clean up listeners, use .once where appropriate
+  
+  tags: [nodejs, memory-leak, events, performance]
+  confidence: 0.85
+  riskScore: 70
+
+- id: perf-blocking-cpu
+  name: CPU-Intensive in Main Thread
+  technology: nodejs
+  category: performance
+  type: antipattern
+  description: |
+    CPU-intensive operations in the main thread block all other requests.
+    Use worker threads for heavy computation.
+  
+  detection:
+    patterns:
+      - "crypto\\.pbkdf2Sync"
+      - "while.*length"
+      - "for.*\\d{6,}"
+      - "JSON\\.parse.*large"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // BLOCKING: Heavy crypto blocks server
+        app.post('/hash', (req, res) => {
+          const hash = crypto.pbkdf2Sync(
+            req.body.password, salt, 100000, 64, 'sha512'
+          );
+          res.json({ hash: hash.toString('hex') });
+        });
+      good: |
+        // NON-BLOCKING: Async version
+        app.post('/hash', async (req, res) => {
+          const hash = await new Promise((resolve, reject) => {
+            crypto.pbkdf2(
+              req.body.password, salt, 100000, 64, 'sha512',
+              (err, key) => err ? reject(err) : resolve(key)
+            );
+          });
+          res.json({ hash: hash.toString('hex') });
+        });
+        
+        // For heavy computation: use worker threads
+        const { Worker } = require('worker_threads');
+        app.post('/process', (req, res) => {
+          const worker = new Worker('./processor.js', {
+            workerData: req.body
+          });
+          worker.on('message', result => res.json(result));
+        });
+  
+  risks:
+    - level: high
+      description: Event loop blocking, request timeouts
+      mitigation: Use async APIs or worker threads for CPU work
+  
+  tags: [nodejs, cpu, blocking, worker-threads, performance]
+  confidence: 0.85
+  riskScore: 70

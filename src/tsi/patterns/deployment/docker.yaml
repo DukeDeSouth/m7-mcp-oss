@@ -1,0 +1,205 @@
+# Docker & Container Anti-Patterns
+# Category: Deployment | Type: Antipattern
+
+- id: deploy-docker-root
+  name: Running as Root in Container
+  technology: docker
+  category: deployment
+  type: antipattern
+  description: |
+    Running applications as root inside containers increases attack surface.
+    If container is compromised, attacker has root privileges.
+  
+  detection:
+    patterns:
+      - "USER root"
+      - "^FROM.*$(?!.*USER)"
+    excludePatterns:
+      - "USER node"
+      - "USER app"
+      - "USER \\d+"
+    fileTypes: [Dockerfile]
+  
+  examples:
+    - language: dockerfile
+      bad: |
+        FROM node:18
+        WORKDIR /app
+        COPY . .
+        RUN npm install
+        # Running as root by default!
+        CMD ["node", "server.js"]
+      good: |
+        FROM node:18
+        
+        # Create non-root user
+        RUN groupadd -r app && useradd -r -g app app
+        
+        WORKDIR /app
+        COPY --chown=app:app package*.json ./
+        RUN npm ci --only=production
+        
+        COPY --chown=app:app . .
+        
+        # Switch to non-root user
+        USER app
+        
+        CMD ["node", "server.js"]
+  
+  risks:
+    - level: high
+      description: Container escape gives root access to host
+      mitigation: Always run as non-root user
+  
+  tags: [docker, security, root, container]
+  confidence: 0.9
+  riskScore: 75
+
+- id: deploy-docker-latest
+  name: Using :latest Tag
+  technology: docker
+  category: deployment
+  type: antipattern
+  description: |
+    Using :latest tag makes builds non-reproducible and can break
+    deployments when the base image changes.
+  
+  detection:
+    patterns:
+      - "FROM.*:latest"
+      - "FROM [a-z]+$"
+    fileTypes: [Dockerfile]
+  
+  examples:
+    - language: dockerfile
+      bad: |
+        FROM node:latest
+        FROM python
+        FROM ubuntu:latest
+      good: |
+        # Pin to specific version
+        FROM node:18.19.0-alpine
+        FROM python:3.11.7-slim
+        FROM ubuntu:22.04
+        
+        # Or use SHA256 for maximum reproducibility
+        FROM node@sha256:abc123...
+  
+  risks:
+    - level: medium
+      description: Unexpected breaking changes, non-reproducible builds
+      mitigation: Pin to specific version tags
+  
+  tags: [docker, versioning, reproducibility]
+  confidence: 0.95
+  riskScore: 55
+
+- id: deploy-docker-large-image
+  name: Large Docker Image
+  technology: docker
+  category: deployment
+  type: antipattern
+  description: |
+    Large images slow down deployments, use more storage, and increase
+    attack surface. Common causes: using full OS images, not cleaning up.
+  
+  detection:
+    patterns:
+      - "FROM ubuntu:"
+      - "FROM debian:"
+      - "RUN apt-get install"
+      - "RUN npm install(?!.*--production)"
+    excludePatterns:
+      - "alpine"
+      - "slim"
+      - "distroless"
+    fileTypes: [Dockerfile]
+  
+  examples:
+    - language: dockerfile
+      bad: |
+        FROM node:18
+        WORKDIR /app
+        COPY . .
+        RUN npm install
+        # Image: ~1GB
+      good: |
+        # Multi-stage build
+        FROM node:18-alpine AS builder
+        WORKDIR /app
+        COPY package*.json ./
+        RUN npm ci
+        COPY . .
+        RUN npm run build
+        
+        # Production image
+        FROM node:18-alpine AS production
+        WORKDIR /app
+        COPY --from=builder /app/dist ./dist
+        COPY --from=builder /app/node_modules ./node_modules
+        # Image: ~150MB
+        
+        USER node
+        CMD ["node", "dist/server.js"]
+  
+  risks:
+    - level: medium
+      description: Slow deployments, more vulnerabilities
+      mitigation: Use alpine/slim images, multi-stage builds
+  
+  tags: [docker, image-size, performance, multi-stage]
+  confidence: 0.85
+  riskScore: 50
+
+- id: deploy-docker-secrets-build
+  name: Secrets in Docker Build
+  technology: docker
+  category: deployment
+  type: antipattern
+  description: |
+    Adding secrets as build args or environment variables exposes them
+    in image layers and build history.
+  
+  detection:
+    patterns:
+      - "ARG.*PASSWORD"
+      - "ARG.*SECRET"
+      - "ARG.*API_KEY"
+      - "ENV.*PASSWORD"
+    fileTypes: [Dockerfile]
+  
+  examples:
+    - language: dockerfile
+      bad: |
+        # DANGEROUS: Secret in build arg
+        ARG NPM_TOKEN
+        RUN echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+        RUN npm install
+        # Token visible in docker history!
+      good: |
+        # Use BuildKit secrets (Docker 18.09+)
+        # syntax=docker/dockerfile:1
+        FROM node:18-alpine
+        
+        RUN --mount=type=secret,id=npm,target=/root/.npmrc \
+            npm ci
+        
+        # Or use multi-stage to exclude secrets
+        FROM node:18-alpine AS builder
+        ARG NPM_TOKEN
+        RUN echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+        RUN npm ci
+        RUN rm .npmrc
+        
+        FROM node:18-alpine
+        COPY --from=builder /app/node_modules ./node_modules
+        # Clean production image without secrets
+  
+  risks:
+    - level: critical
+      description: Secrets exposed in image layers
+      mitigation: Use BuildKit secrets or multi-stage builds
+  
+  tags: [docker, secrets, security, build]
+  confidence: 0.9
+  riskScore: 85

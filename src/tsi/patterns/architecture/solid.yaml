@@ -1,0 +1,311 @@
+# SOLID Principle Violations
+# Category: Architecture | Type: Antipattern
+
+- id: arch-god-object
+  name: God Object / God Class
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    A class that knows too much or does too much. It violates Single 
+    Responsibility Principle and becomes hard to maintain, test, and extend.
+  
+  detection:
+    patterns:
+      - "class.*\\{[\\s\\S]{3000,}\\}"
+      - "export class.*methods.*20"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: typescript
+      bad: |
+        // GOD CLASS: Does everything
+        class UserManager {
+          async createUser() { /* ... */ }
+          async updateUser() { /* ... */ }
+          async deleteUser() { /* ... */ }
+          async sendEmail() { /* ... */ }
+          async generateReport() { /* ... */ }
+          async processPayment() { /* ... */ }
+          async uploadAvatar() { /* ... */ }
+          async validateAddress() { /* ... */ }
+          // ... 50 more methods
+        }
+      good: |
+        // SPLIT: Single responsibility
+        class UserRepository {
+          async create(data) { /* ... */ }
+          async update(id, data) { /* ... */ }
+          async delete(id) { /* ... */ }
+        }
+        
+        class EmailService {
+          async send(to, subject, body) { /* ... */ }
+        }
+        
+        class PaymentService {
+          async process(userId, amount) { /* ... */ }
+        }
+        
+        class ReportGenerator {
+          async generateUserReport(userId) { /* ... */ }
+        }
+  
+  risks:
+    - level: high
+      description: Hard to test, high coupling, difficult to modify
+      mitigation: Split into focused classes with single responsibility
+  
+  tags: [god-class, solid, srp, architecture]
+  confidence: 0.75
+  riskScore: 65
+
+- id: arch-circular-dependency
+  name: Circular Dependencies
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Modules that depend on each other create circular dependencies,
+    leading to initialization problems and tight coupling.
+  
+  detection:
+    patterns:
+      - "import.*from.*\\./"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: typescript
+      bad: |
+        // user.ts
+        import { Order } from './order';
+        export class User {
+          orders: Order[];
+        }
+        
+        // order.ts
+        import { User } from './user';
+        export class Order {
+          user: User;  // Circular!
+        }
+      good: |
+        // types.ts - Shared interfaces
+        export interface IUser {
+          id: string;
+          name: string;
+        }
+        export interface IOrder {
+          id: string;
+          userId: string;
+        }
+        
+        // user.ts
+        import { IUser, IOrder } from './types';
+        export class User implements IUser {
+          id: string;
+          name: string;
+        }
+        
+        // order.ts
+        import { IOrder } from './types';
+        export class Order implements IOrder {
+          id: string;
+          userId: string;  // Reference by ID, not object
+        }
+  
+  risks:
+    - level: medium
+      description: Initialization errors, confusing dependencies
+      mitigation: Extract shared interfaces, use dependency injection
+  
+  tags: [circular, dependencies, coupling, architecture]
+  confidence: 0.7
+  riskScore: 55
+
+- id: arch-hardcoded-config
+  name: Hardcoded Configuration
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Hardcoding environment-specific values makes code inflexible
+    and requires code changes for different environments.
+  
+  detection:
+    patterns:
+      - "localhost:\\d+"
+      - "127\\.0\\.0\\.1"
+      - "http://api\\."
+      - "mongodb://.*@"
+    excludePatterns:
+      - "process\\.env"
+      - "// example"
+      - "test"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        const API_URL = 'http://api.myapp.com';
+        const DB_HOST = 'production-db.myapp.com';
+        const REDIS_URL = 'redis://localhost:6379';
+      good: |
+        // config.ts
+        export const config = {
+          apiUrl: process.env.API_URL || 'http://localhost:3000',
+          db: {
+            host: process.env.DB_HOST || 'localhost',
+            port: parseInt(process.env.DB_PORT || '5432'),
+            name: process.env.DB_NAME || 'myapp_dev'
+          },
+          redis: {
+            url: process.env.REDIS_URL || 'redis://localhost:6379'
+          }
+        };
+        
+        // Validate at startup
+        const requiredEnvVars = ['API_URL', 'DB_HOST'];
+        for (const envVar of requiredEnvVars) {
+          if (!process.env[envVar]) {
+            throw new Error(`Missing required env var: ${envVar}`);
+          }
+        }
+  
+  risks:
+    - level: medium
+      description: Different environments need code changes
+      mitigation: Use environment variables with sensible defaults
+  
+  tags: [config, environment, hardcoded, architecture]
+  confidence: 0.85
+  riskScore: 50
+
+- id: arch-deep-nesting
+  name: Deep Nesting / Arrow Anti-Pattern
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Deeply nested callbacks or conditions (arrow anti-pattern) make code
+    hard to read and maintain. Usually indicates missing abstraction.
+  
+  detection:
+    patterns:
+      - "\\{.*\\{.*\\{.*\\{.*\\{"
+      - "if.*if.*if.*if"
+      - "then.*then.*then.*then"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // ARROW ANTI-PATTERN
+        function processOrder(order) {
+          if (order) {
+            if (order.items) {
+              if (order.items.length > 0) {
+                if (order.user) {
+                  if (order.user.isActive) {
+                    if (order.payment) {
+                      // Finally do something...
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      good: |
+        // GUARD CLAUSES: Flat structure
+        function processOrder(order) {
+          if (!order) return { error: 'No order' };
+          if (!order.items?.length) return { error: 'No items' };
+          if (!order.user?.isActive) return { error: 'Inactive user' };
+          if (!order.payment) return { error: 'No payment' };
+          
+          // Main logic at same nesting level
+          return doProcessOrder(order);
+        }
+        
+        // EXTRACT FUNCTIONS
+        function validateOrder(order) {
+          if (!order) throw new Error('No order');
+          if (!order.items?.length) throw new Error('No items');
+          if (!order.user?.isActive) throw new Error('Inactive user');
+          if (!order.payment) throw new Error('No payment');
+        }
+        
+        function processOrder(order) {
+          validateOrder(order);
+          return doProcessOrder(order);
+        }
+  
+  risks:
+    - level: medium
+      description: Hard to read, test, and maintain
+      mitigation: Use guard clauses, extract functions
+  
+  tags: [nesting, arrow, readability, architecture]
+  confidence: 0.8
+  riskScore: 45
+
+- id: arch-magic-numbers
+  name: Magic Numbers / Strings
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Using unexplained literal values makes code hard to understand
+    and maintain. Changes require finding all occurrences.
+  
+  detection:
+    patterns:
+      - "\\s[0-9]{3,}\\s"
+      - "setTimeout.*[0-9]{4,}"
+      - "status.*===.*[0-9]"
+    excludePatterns:
+      - "const"
+      - "enum"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        if (user.role === 1) { /* ... */ }
+        if (order.status === 3) { /* ... */ }
+        setTimeout(doSomething, 86400000);
+        if (response.code === 401) { /* ... */ }
+      good: |
+        // Constants
+        const ROLE_ADMIN = 1;
+        const ROLE_USER = 2;
+        
+        const ORDER_STATUS = {
+          PENDING: 1,
+          PROCESSING: 2,
+          COMPLETED: 3,
+          CANCELLED: 4
+        };
+        
+        const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+        
+        // Usage
+        if (user.role === ROLE_ADMIN) { /* ... */ }
+        if (order.status === ORDER_STATUS.COMPLETED) { /* ... */ }
+        setTimeout(doSomething, ONE_DAY_MS);
+        
+        // Or use TypeScript enums
+        enum HttpStatus {
+          OK = 200,
+          Unauthorized = 401,
+          NotFound = 404
+        }
+  
+  risks:
+    - level: low
+      description: Hard to understand intent, error-prone changes
+      mitigation: Extract to named constants or enums
+  
+  tags: [magic-numbers, constants, readability]
+  confidence: 0.75
+  riskScore: 35

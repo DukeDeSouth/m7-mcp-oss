@@ -1,0 +1,302 @@
+# Coupling & Dependency Anti-Patterns
+# Category: Architecture | Type: Antipattern
+
+- id: arch-tight-coupling
+  name: Tight Coupling to Implementation
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Depending on concrete implementations instead of abstractions
+    makes code inflexible and hard to test.
+  
+  detection:
+    patterns:
+      - "new.*Service\\("
+      - "import.*Service.*from"
+    excludePatterns:
+      - "interface"
+      - "inject"
+      - "mock"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: typescript
+      bad: |
+        // TIGHT COUPLING: Depends on concrete class
+        class OrderService {
+          private emailService = new EmailService();
+          private paymentService = new PaymentService();
+          
+          async processOrder(order: Order) {
+            await this.paymentService.charge(order.total);
+            await this.emailService.sendConfirmation(order);
+          }
+        }
+      good: |
+        // LOOSE COUPLING: Depends on interfaces
+        interface IEmailService {
+          sendConfirmation(order: Order): Promise<void>;
+        }
+        
+        interface IPaymentService {
+          charge(amount: number): Promise<void>;
+        }
+        
+        class OrderService {
+          constructor(
+            private emailService: IEmailService,
+            private paymentService: IPaymentService
+          ) {}
+          
+          async processOrder(order: Order) {
+            await this.paymentService.charge(order.total);
+            await this.emailService.sendConfirmation(order);
+          }
+        }
+        
+        // Inject dependencies
+        const orderService = new OrderService(
+          new EmailService(),
+          new StripePaymentService()
+        );
+  
+  risks:
+    - level: medium
+      description: Hard to test, hard to swap implementations
+      mitigation: Use dependency injection and interfaces
+  
+  tags: [coupling, dependency-injection, solid, testability]
+  confidence: 0.75
+  riskScore: 50
+
+- id: arch-feature-envy
+  name: Feature Envy
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    A method that uses more features from another class than its own.
+    Usually indicates logic belongs in the other class.
+  
+  detection:
+    patterns:
+      - "this\\.\\w+\\.\\w+\\.\\w+"
+      - "other\\.\\w+.*other\\.\\w+.*other\\.\\w+"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: typescript
+      bad: |
+        // FEATURE ENVY: Uses customer data extensively
+        class Order {
+          calculateDiscount(customer: Customer) {
+            if (customer.loyaltyPoints > 1000) {
+              if (customer.membershipLevel === 'gold') {
+                return customer.baseDiscount * customer.multiplier;
+              }
+              return customer.baseDiscount;
+            }
+            return 0;
+          }
+        }
+      good: |
+        // MOVED: Logic belongs in Customer
+        class Customer {
+          calculateDiscount(): number {
+            if (this.loyaltyPoints > 1000) {
+              if (this.membershipLevel === 'gold') {
+                return this.baseDiscount * this.multiplier;
+              }
+              return this.baseDiscount;
+            }
+            return 0;
+          }
+        }
+        
+        class Order {
+          calculateTotal(customer: Customer) {
+            const discount = customer.calculateDiscount();
+            return this.subtotal * (1 - discount);
+          }
+        }
+  
+  risks:
+    - level: low
+      description: Poor encapsulation, harder to maintain
+      mitigation: Move logic to the class whose data it uses
+  
+  tags: [feature-envy, encapsulation, refactoring]
+  confidence: 0.7
+  riskScore: 35
+
+- id: arch-anemic-domain
+  name: Anemic Domain Model
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Domain objects that are just data holders with no behavior.
+    Business logic scattered in services instead of domain objects.
+  
+  detection:
+    patterns:
+      - "class.*\\{.*get.*set.*\\}"
+      - "interface.*\\{.*:.*:.*:.*\\}"
+    excludePatterns:
+      - "implements"
+      - "extends"
+    fileTypes: [ts]
+  
+  examples:
+    - language: typescript
+      bad: |
+        // ANEMIC: Just data, no behavior
+        class Order {
+          id: string;
+          items: OrderItem[];
+          status: string;
+          total: number;
+        }
+        
+        // Logic scattered in services
+        class OrderService {
+          calculateTotal(order: Order): number {
+            return order.items.reduce((sum, item) => 
+              sum + item.price * item.quantity, 0);
+          }
+          
+          canBeCancelled(order: Order): boolean {
+            return order.status === 'pending';
+          }
+        }
+      good: |
+        // RICH DOMAIN: Contains behavior
+        class Order {
+          private _id: string;
+          private _items: OrderItem[];
+          private _status: OrderStatus;
+          
+          get total(): number {
+            return this._items.reduce((sum, item) => 
+              sum + item.subtotal, 0);
+          }
+          
+          canBeCancelled(): boolean {
+            return this._status === OrderStatus.Pending;
+          }
+          
+          cancel(): void {
+            if (!this.canBeCancelled()) {
+              throw new Error('Order cannot be cancelled');
+            }
+            this._status = OrderStatus.Cancelled;
+          }
+          
+          addItem(item: OrderItem): void {
+            if (this._status !== OrderStatus.Pending) {
+              throw new Error('Cannot modify non-pending order');
+            }
+            this._items.push(item);
+          }
+        }
+  
+  risks:
+    - level: medium
+      description: Business rules scattered, hard to enforce invariants
+      mitigation: Move behavior into domain objects
+  
+  tags: [anemic, ddd, domain-model, architecture]
+  confidence: 0.7
+  riskScore: 45
+
+- id: arch-spaghetti-code
+  name: Spaghetti Code / No Structure
+  technology: javascript
+  category: architecture
+  type: antipattern
+  description: |
+    Code without clear structure, with tangled control flow and mixed
+    concerns. Usually grows organically without design.
+  
+  detection:
+    patterns:
+      - "function.*\\{[\\s\\S]{500,}\\}"
+      - "if.*else.*if.*else.*if.*else"
+    fileTypes: [js, ts]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SPAGHETTI: Everything mixed together
+        app.post('/order', async (req, res) => {
+          const { userId, items, address } = req.body;
+          
+          // Validation mixed with business logic
+          if (!userId) return res.status(400).send('No user');
+          const user = await db.query('SELECT * FROM users WHERE id = ?', [userId]);
+          if (!user) return res.status(404).send('User not found');
+          
+          // More validation
+          if (!items || items.length === 0) return res.status(400).send('No items');
+          
+          // Business logic mixed with data access
+          let total = 0;
+          for (const item of items) {
+            const product = await db.query('SELECT * FROM products WHERE id = ?', [item.id]);
+            if (product.stock < item.quantity) {
+              return res.status(400).send('Not enough stock');
+            }
+            total += product.price * item.quantity;
+          }
+          
+          // More mixed code...
+          // ... 200 more lines
+        });
+      good: |
+        // STRUCTURED: Separated concerns
+        
+        // Validation layer
+        const validateOrderRequest = (body) => {
+          if (!body.userId) throw new ValidationError('userId required');
+          if (!body.items?.length) throw new ValidationError('items required');
+          return { userId: body.userId, items: body.items };
+        };
+        
+        // Service layer
+        class OrderService {
+          constructor(
+            private userRepo: UserRepository,
+            private orderRepo: OrderRepository
+          ) {}
+          
+          async createOrder(userId: string, items: OrderItem[]) {
+            const user = await this.userRepo.findById(userId);
+            if (!user) throw new NotFoundError('User not found');
+            
+            const order = new Order(user, items);
+            await order.validate();
+            
+            return this.orderRepo.save(order);
+          }
+        }
+        
+        // Controller layer
+        app.post('/order', async (req, res, next) => {
+          try {
+            const input = validateOrderRequest(req.body);
+            const order = await orderService.createOrder(input.userId, input.items);
+            res.json(order);
+          } catch (error) {
+            next(error);
+          }
+        });
+  
+  risks:
+    - level: high
+      description: Unmaintainable, hard to test, bug-prone
+      mitigation: Apply layered architecture, extract concerns
+  
+  tags: [spaghetti, structure, layers, maintainability]
+  confidence: 0.7
+  riskScore: 60

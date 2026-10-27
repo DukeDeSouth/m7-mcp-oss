@@ -1,0 +1,219 @@
+# Frontend Performance Anti-Patterns
+# Category: Performance | Type: Antipattern
+
+- id: perf-react-inline-functions
+  name: Inline Functions in React Render
+  technology: react
+  category: performance
+  type: antipattern
+  description: |
+    Creating new function instances on every render breaks memoization
+    and causes unnecessary child re-renders.
+  
+  detection:
+    patterns:
+      - "onClick=\\{\\(\\)\\s*=>"
+      - "onChange=\\{\\(e\\)\\s*=>"
+      - "onSubmit=\\{function"
+    fileTypes: [jsx, tsx]
+  
+  examples:
+    - language: jsx
+      bad: |
+        function List({ items }) {
+          return items.map(item => (
+            // SLOW: New function created on every render
+            <Item 
+              key={item.id}
+              onClick={() => handleClick(item.id)}
+            />
+          ));
+        }
+      good: |
+        // FAST: Stable function reference with useCallback
+        function List({ items }) {
+          const handleClick = useCallback((id) => {
+            // handle click
+          }, []);
+          
+          return items.map(item => (
+            <Item 
+              key={item.id}
+              id={item.id}
+              onClick={handleClick}
+            />
+          ));
+        }
+        
+        // FAST: Pass data via data attributes
+        function Item({ id, onClick }) {
+          const handleClick = useCallback(() => {
+            onClick(id);
+          }, [id, onClick]);
+          
+          return <button onClick={handleClick}>Click</button>;
+        }
+  
+  risks:
+    - level: medium
+      description: Unnecessary re-renders, sluggish UI
+      mitigation: Use useCallback for event handlers
+  
+  tags: [react, performance, useCallback, render]
+  confidence: 0.8
+  riskScore: 50
+
+- id: perf-react-missing-memo
+  name: Missing React.memo on Pure Components
+  technology: react
+  category: performance
+  type: antipattern
+  description: |
+    Components that only depend on props should use React.memo
+    to skip re-renders when props haven't changed.
+  
+  detection:
+    patterns:
+      - "function\\s+[A-Z]\\w*\\(\\{.*\\}\\)"
+      - "const\\s+[A-Z]\\w*\\s*=\\s*\\(\\{.*\\}\\)\\s*=>"
+    excludePatterns:
+      - "React\\.memo"
+      - "memo\\("
+    fileTypes: [jsx, tsx]
+  
+  examples:
+    - language: jsx
+      bad: |
+        // Re-renders even if props unchanged
+        function UserCard({ user }) {
+          return (
+            <div>
+              <img src={user.avatar} />
+              <span>{user.name}</span>
+            </div>
+          );
+        }
+      good: |
+        // FAST: Only re-renders when user changes
+        const UserCard = React.memo(function UserCard({ user }) {
+          return (
+            <div>
+              <img src={user.avatar} />
+              <span>{user.name}</span>
+            </div>
+          );
+        });
+        
+        // With custom comparison
+        const UserCard = React.memo(
+          function UserCard({ user }) { ... },
+          (prev, next) => prev.user.id === next.user.id
+        );
+  
+  risks:
+    - level: low
+      description: Unnecessary component re-renders
+      mitigation: Use React.memo for pure presentational components
+  
+  tags: [react, memo, performance, render]
+  confidence: 0.7
+  riskScore: 40
+
+- id: perf-large-bundle
+  name: Large Bundle Size
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    Importing entire libraries when only small parts are needed
+    bloats bundle size and slows page load.
+  
+  detection:
+    patterns:
+      - "import \\* as _ from 'lodash'"
+      - "import _ from 'lodash'"
+      - "import moment from 'moment'"
+      - "import \\{ .* \\} from '@mui/material'"
+    fileTypes: [js, ts, jsx, tsx]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // LARGE: Imports entire library (70KB+)
+        import _ from 'lodash';
+        const result = _.debounce(fn, 100);
+        
+        // LARGE: Imports entire moment (300KB+)
+        import moment from 'moment';
+        const date = moment().format('YYYY-MM-DD');
+      good: |
+        // SMALL: Import only what you need
+        import debounce from 'lodash/debounce';
+        const result = debounce(fn, 100);
+        
+        // SMALL: Use date-fns (tree-shakeable)
+        import { format } from 'date-fns';
+        const date = format(new Date(), 'yyyy-MM-dd');
+        
+        // SMALL: Use native Intl
+        const date = new Intl.DateTimeFormat('en-CA').format(new Date());
+        
+        // MUI: Use deep imports
+        import Button from '@mui/material/Button';
+  
+  risks:
+    - level: medium
+      description: Slow initial page load, poor Core Web Vitals
+      mitigation: Use tree-shaking, dynamic imports, smaller alternatives
+  
+  tags: [bundle, performance, lodash, moment, tree-shaking]
+  confidence: 0.85
+  riskScore: 55
+
+- id: perf-sync-localstorage
+  name: Synchronous localStorage in Render
+  technology: javascript
+  category: performance
+  type: antipattern
+  description: |
+    localStorage operations are synchronous and block the main thread.
+    Heavy usage during render can cause UI jank.
+  
+  detection:
+    patterns:
+      - "localStorage\\.getItem.*render"
+      - "localStorage\\.setItem.*map"
+      - "sessionStorage\\.getItem.*forEach"
+    fileTypes: [js, ts, jsx, tsx]
+  
+  examples:
+    - language: javascript
+      bad: |
+        // SLOW: Blocking localStorage in render
+        function Component() {
+          const items = JSON.parse(localStorage.getItem('items') || '[]');
+          return items.map(item => <Item key={item.id} {...item} />);
+        }
+      good: |
+        // FAST: Load once with useState
+        function Component() {
+          const [items, setItems] = useState(() => {
+            const stored = localStorage.getItem('items');
+            return stored ? JSON.parse(stored) : [];
+          });
+          
+          return items.map(item => <Item key={item.id} {...item} />);
+        }
+        
+        // Or use IndexedDB for large data
+        import { get, set } from 'idb-keyval';
+        const items = await get('items') || [];
+  
+  risks:
+    - level: medium
+      description: Main thread blocking, UI freeze
+      mitigation: Cache in state, use lazy initialization
+  
+  tags: [localstorage, performance, blocking, render]
+  confidence: 0.8
+  riskScore: 45
