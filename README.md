@@ -157,7 +157,10 @@ root; that directory is git-ignored.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and PRs are welcome; I cannot
-promise fast turnaround.
+promise fast turnaround. If you want something concrete to work on,
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md) lists confirmed defects with code
+references and a suggested order. The first response sprint (Stage 1 batch 1) is
+documented in [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
 
 ## License
 

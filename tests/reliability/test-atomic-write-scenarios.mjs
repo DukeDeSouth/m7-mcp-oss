@@ -216,11 +216,9 @@ await asyncTest('Recover from corrupted file', async () => {
   
   // Try to read
   const result = await safeReadJSON(filePath);
-  
-  // Should either recover from backup or return error
-  if (result.data) {
-    assert.ok(result.recoveredFrom, 'Should indicate recovery');
-  }
+
+  assert.ok(result.data, 'Must recover data from backup');
+  assert.ok(result.recoveredFrom, 'Must set recoveredFrom');
 });
 
 await asyncTest('Restore from most recent backup', async () => {

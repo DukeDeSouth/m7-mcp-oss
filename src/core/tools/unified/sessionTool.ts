@@ -7,6 +7,7 @@ const UnifiedSessionRequestSchema = z.object({
   requirement: z.string().optional(),
   evidence: z.any().optional(),
   notes: z.string().optional(),
+  force: z.boolean().optional(),
   enforcement_action: z.enum(['code_change', 'file_edit', 'implementation']).optional()
 });
 
@@ -40,6 +41,11 @@ export const unifiedSessionTool = {
         description: 'Additional notes',
         optional: true
       },
+      force: {
+        type: 'boolean',
+        description: 'When completing a session, bypass phase and requirement guards (recorded on the session)',
+        optional: true
+      },
       enforcement_action: {
         type: 'string',
         enum: ['code_change', 'file_edit', 'implementation'],
@@ -51,7 +57,7 @@ export const unifiedSessionTool = {
   },
   handler: async (request: any, orchestrator: TaskOrchestrator) => {
     const params = UnifiedSessionRequestSchema.parse(request);
-    const { action, session_id, requirement, evidence, notes, enforcement_action } = params;
+    const { action, session_id, requirement, evidence, notes, force, enforcement_action } = params;
 
     try {
       let targetSessionId = session_id;
@@ -255,15 +261,22 @@ export const unifiedSessionTool = {
             break;
           }
 
-          const result = await orchestrator.completeSession(targetSessionId);
-          
+          const result = await orchestrator.completeSession(targetSessionId, notes, {
+            force: force === true,
+          });
+
           if (result) {
             response += `🎉 **Session Completed Successfully**\n\n`;
             response += `**Session:** ${targetSessionId}\n`;
+            if (force) {
+              response += `\n⚠️ Completed with force: true (requirements were bypassed).\n`;
+            }
             response += `\n✅ Session archived and metrics recorded.\n`;
           } else {
-            response += `❌ **Session Completion Failed**\n\n`;
-            response += `**Error:** Could not complete session\n`;
+            const session = orchestrator.getSessionStatus(targetSessionId);
+            const reason = session?.lastError ?? 'Could not complete session';
+            response += `❌ **Session Completion Refused**\n\n`;
+            response += `**Reason:** ${reason}\n`;
           }
           
           break;

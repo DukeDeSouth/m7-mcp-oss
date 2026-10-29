@@ -73,14 +73,25 @@ export const cycleTool = {
     // Case 1: Start new cycle
     if (task_description && !task_id) {
       log.debug(`Starting new cycle: ${task_description.substring(0, 50)}...`);
-      
-      const instruction = await orchestrator.startCycle(task_description);
-      return {
-        content: [{
-          type: 'text',
-          text: formatCycleResponse(instruction)
-        }]
-      };
+
+      try {
+        const instruction = await orchestrator.startCycle(task_description);
+        return {
+          content: [{
+            type: 'text',
+            text: formatCycleResponse(instruction)
+          }]
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{
+            type: 'text',
+            text: `# ❌ M7 Cycle Error\n\nFailed to start cycle: ${msg}`
+          }],
+          isError: true
+        };
+      }
     }
     
     // Case 2: Submit artifact or reflection

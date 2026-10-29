@@ -26,6 +26,14 @@ export interface TaskSession {
     reason: string;
     timestamp: Date;
   }>;
+  /** Set when completeSession (or guard) refuses; cleared on successful completion. */
+  lastError?: string;
+  /** Present when the session was closed with force: true. */
+  forcedCompletion?: { at: string; notes?: string };
+}
+
+export interface CompleteSessionOptions {
+  force?: boolean;
 }
 
 /**
@@ -46,6 +54,8 @@ interface SerializedSession {
     reason: string;
     timestamp: string; // ISO string
   }>;
+  lastError?: string;
+  forcedCompletion?: { at: string; notes?: string };
 }
 
 export interface M7Agent {
@@ -188,7 +198,9 @@ export class TaskOrchestrator {
         phase: v.phase,
         reason: v.reason,
         timestamp: v.timestamp.toISOString()
-      }))
+      })),
+      lastError: session.lastError,
+      forcedCompletion: session.forcedCompletion,
     };
   }
 
@@ -209,7 +221,9 @@ export class TaskOrchestrator {
         phase: v.phase,
         reason: v.reason,
         timestamp: new Date(v.timestamp)
-      }))
+      })),
+      lastError: data.lastError,
+      forcedCompletion: data.forcedCompletion,
     };
   }
 
@@ -504,21 +518,56 @@ export class TaskOrchestrator {
   }
 
   private isPhaseCompleted(session: TaskSession, phase: string): boolean {
-    const phaseRequirements = this.getPhaseRequirements(phase);
+    const phaseRequirements = this.getPhaseRequirements(session, phase);
+    if (phaseRequirements.length === 0) {
+      return false;
+    }
     return phaseRequirements.every(req => session.phaseRequirements[req]);
   }
 
-  private getPhaseRequirements(phase: string): string[] {
+  private getPhaseRequirements(session: TaskSession, phase: string): string[] {
+    let base: string[];
     switch (phase) {
       case 'discovery':
-        return ['existing_system_analysis', 'context7_verification', 'alternatives_researched', 'best_practices_documented', 'edge_cases_identified'];
+        base = [
+          'existing_system_analysis',
+          'context7_verification',
+          'alternatives_researched',
+          'best_practices_documented',
+          'edge_cases_identified',
+        ];
+        break;
       case 'architecture':
-        return ['components_mapped', 'dependencies_verified', 'integration_points_documented', 'performance_impact_assessed'];
+        base = [
+          'components_mapped',
+          'dependencies_verified',
+          'integration_points_documented',
+          'performance_impact_assessed',
+        ];
+        break;
       case 'planning':
-        return ['user_validation', 'implementation_plan_created', 'critical_risks_mitigated', 'tests_planned', 'rollback_plan_documented'];
+        base = [
+          'user_validation',
+          'implementation_plan_created',
+          'critical_risks_mitigated',
+          'tests_planned',
+          'rollback_plan_documented',
+        ];
+        break;
+      case 'implementation':
+        base = ['code_quality_verified', 'tests_passing', 'performance_benchmarks_met'];
+        break;
+      case 'validation':
+        base = [
+          'playwright_validation_passed',
+          'success_metrics_measured',
+          'documentation_updated',
+        ];
+        break;
       default:
         return [];
     }
+    return base.filter(key => key in session.phaseRequirements);
   }
 
   private generateNextActions(session: TaskSession): string[] {
@@ -592,14 +641,18 @@ export class TaskOrchestrator {
   }
 
   private checkPhaseTransition(session: TaskSession): void {
-    const currentPhaseReqs = this.getPhaseRequirements(session.currentPhase);
+    const currentPhaseReqs = this.getPhaseRequirements(session, session.currentPhase);
+    if (currentPhaseReqs.length === 0) {
+      return;
+    }
     const isCurrentPhaseComplete = currentPhaseReqs.every(req => session.phaseRequirements[req]);
 
     if (isCurrentPhaseComplete) {
       const nextPhase = this.getNextPhase(session.currentPhase);
-      if (nextPhase) {
+      if (nextPhase && nextPhase !== 'completed') {
         session.currentPhase = nextPhase;
         session.phaseTimestamps[nextPhase] = new Date();
+        this.schedulePersist();
       }
     }
   }
@@ -809,19 +862,63 @@ export class TaskOrchestrator {
     return {canComplete: false, reason: `Only ${completionPercent.toFixed(0)}% complete - more work needed`};
   }
 
-  async completeSession(sessionId: string, completionNotes?: string): Promise<boolean> {
+  async completeSession(
+    sessionId: string,
+    completionNotes?: string,
+    options?: CompleteSessionOptions
+  ): Promise<boolean> {
     await this.ensureSessionsLoaded(); // v3.10.5
     const session = this.activeSessions.get(sessionId);
-    if (!session) return false;
+    if (!session) {
+      return false;
+    }
 
+    if (session.currentPhase === 'completed') {
+      session.lastError = 'Session is already completed.';
+      this.schedulePersist();
+      return false;
+    }
+
+    const force = options?.force === true;
+    if (!force) {
+      if (session.currentPhase !== 'validation') {
+        session.lastError =
+          `Cannot complete session from phase "${session.currentPhase}". ` +
+          'Reach the validation phase with all validation requirements marked complete, or pass force: true.';
+        this.schedulePersist();
+        return false;
+      }
+      if (!this.isPhaseCompleted(session, 'validation')) {
+        const pending = this.getPhaseRequirements(session, 'validation').filter(
+          req => !session.phaseRequirements[req]
+        );
+        session.lastError =
+          `Validation requirements incomplete: ${pending.join(', ') || 'unknown'}. ` +
+          'Use mark_complete for each requirement, or pass force: true.';
+        this.schedulePersist();
+        return false;
+      }
+    } else {
+      session.forcedCompletion = {
+        at: new Date().toISOString(),
+        notes: completionNotes,
+      };
+    }
+
+    session.lastError = undefined;
+    await this.finalizeCompletedSession(session, completionNotes);
+    return true;
+  }
+
+  private async finalizeCompletedSession(session: TaskSession, completionNotes?: string): Promise<void> {
     session.currentPhase = 'completed';
     session.phaseTimestamps.completed = new Date();
-    
+
     // v3.9: End cross-session tracking and extract insights
     try {
       const { newInsights, qualityScore } = await this.crossSessionLearning.endSession(session);
       log.debug(`M7 v3.9] ■ Cross-Session tracking ended: ${newInsights.length} insights extracted (quality: ${qualityScore.toFixed(0)}/100)`);
-      
+
       if (newInsights.length > 0) {
         log.debug(`M7 v3.9] 💡 New insights:`);
         newInsights.slice(0, 3).forEach(insight => {
@@ -831,8 +928,7 @@ export class TaskOrchestrator {
     } catch (e: any) {
       log.warn(`M7 v3.9] Cross-Session tracking failed to end: ${e.message}`);
     }
-    
-    // Log completion
+
     await this.journal.logFeature({
       name: `M7 Session Completed`,
       description: `Task: ${session.taskDescription}`,
@@ -843,6 +939,5 @@ export class TaskOrchestrator {
     });
 
     this.schedulePersist(); // v3.10.5: Save completed state
-    return true;
   }
 } 
