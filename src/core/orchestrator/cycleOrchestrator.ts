@@ -9,6 +9,8 @@ import { createLogger } from '../utils/logger.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { getProjectPath } from '../utils/projectPath.js';
+import { atomicWriteJSON, safeReadJSON } from '../utils/atomicWrite.js';
+import { StatePersistError } from '../errors/statePersist.js';
 const CYCLES_DIR = 'm7-cycles';
 import {
   CycleState,
@@ -51,6 +53,11 @@ import {
 } from './ruleReinjection.js';
 
 const log = createLogger('[cycleOrchestrator]');
+
+/** Result of parsing a reflection submission. ok:false never advances the cycle. */
+type ParsedReflection =
+  | { ok: true; reflection: ReflectionGate }
+  | { ok: false; reason: string };
 
 export class CycleOrchestrator {
   private cycles: Map<string, CycleState> = new Map();
@@ -135,9 +142,8 @@ export class CycleOrchestrator {
       phaseEnteredAt: new Date().toISOString(),
     };
     
-    // Save state
-    this.cycles.set(taskId, state);
-    await this.saveState(state);
+    // Persist before exposing cycle in memory
+    await this.commitState(state);
     
     // Create artifacts directory
     const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, taskSlug);
@@ -145,7 +151,15 @@ export class CycleOrchestrator {
     
     log.debug(`Started M7 Cycle: ${taskId}`);
     
-    return this.finalizeInstruction(state, this.generateInstruction(state));
+    const committed = this.cycles.get(taskId)!;
+    const fin = await this.finalizeInstruction(committed, this.generateInstruction(committed));
+    if ('success' in fin && fin.success === false) {
+      throw new StatePersistError(
+        this.cycleStatePath(taskId),
+        fin.error ?? 'finalize instruction persist failed'
+      );
+    }
+    return fin as CycleInstruction;
   }
   
   /**
@@ -163,121 +177,128 @@ export class CycleOrchestrator {
     // Validate artifact (basic length check)
     const minLength = 100;
     if (!artifactContent || artifactContent.trim().length < minLength) {
-      state.phaseAttempts[state.currentPhase]++;
-      await this.saveState(state);
-      
-      // Loop prevention - max 3 attempts per phase
-      if (state.phaseAttempts[state.currentPhase] >= 3) {
-        log.warn(`Loop detected in ${state.currentPhase} for ${taskId}, forcing transition`);
-        // Force transition anyway to prevent infinite loops
+      const attemptResult = await this.withCommittedState(taskId, draft => {
+        draft.phaseAttempts[draft.currentPhase]++;
+      });
+      if (this.isPersistFailure(attemptResult)) {
+        return attemptResult;
+      }
+      const after = attemptResult.committed;
+
+      if (after.phaseAttempts[after.currentPhase] >= 3) {
+        log.warn(`Loop detected in ${after.currentPhase} for ${taskId}, forcing transition`);
       } else {
         return {
           success: false,
-          error: `Artifact too short (${artifactContent.trim().length} chars). Minimum ${minLength} chars required. Attempt ${state.phaseAttempts[state.currentPhase]}/3.`
+          error: `Artifact too short (${artifactContent.trim().length} chars). Minimum ${minLength} chars required. Attempt ${after.phaseAttempts[after.currentPhase]}/3.`
         };
       }
     }
-    
-    // Store artifact content
-    state.artifacts[state.currentPhase] = artifactContent;
-    state.completedPhases.push(state.currentPhase);
-    
-    // Save artifact file to disk with template header for human readability
-    const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, state.taskSlug);
-    const filename = this.getArtifactFilename(state.currentPhase);
-    
+
+    const pre = state;
+
+    const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, pre.taskSlug);
+    const filename = this.getArtifactFilename(pre.currentPhase);
+
     try {
       await fs.mkdir(artifactsDir, { recursive: true });
-      
-      // Prepend template header if AI didn't include one
-      const fileContent = this.ensureTemplateHeader(state, artifactContent);
-      
-      await fs.writeFile(
-        path.join(artifactsDir, filename),
-        fileContent,
-        'utf-8'
-      );
+      const fileContent = this.ensureTemplateHeader(pre, artifactContent);
+      await fs.writeFile(path.join(artifactsDir, filename), fileContent, 'utf-8');
       log.debug(`Saved artifact: ${filename}`);
     } catch (err) {
       log.warn(`Failed to save artifact file: ${err}`);
     }
-    
-    // Grounding cache (solution phase only)
-    if (state.currentPhase === 'solution') {
-      try {
-        const spec = parseGroundingSpec(artifactContent);
-        const groundingResult = await runGroundingCheck(spec, 'full');
-        state.groundingCheckAtSolution = {
-          capturedAt: new Date().toISOString(),
-          stats: groundingResult.stats,
-          hasStrongWarning: groundingResult.stats.strongWarnings > 0,
-        };
-      } catch (err) {
-        log.debug('Grounding check at solution submit skipped:', err);
+
+    let spawnedIds: string[] | undefined;
+    const commitResult = await this.withCommittedStateAsync(taskId, async draft => {
+      draft.artifacts[draft.currentPhase] = artifactContent;
+      if (!draft.completedPhases.includes(draft.currentPhase)) {
+        draft.completedPhases.push(draft.currentPhase);
       }
+
+      if (draft.currentPhase === 'solution') {
+        try {
+          const spec = parseGroundingSpec(artifactContent);
+          const groundingResult = await runGroundingCheck(spec, 'full');
+          draft.groundingCheckAtSolution = {
+            capturedAt: new Date().toISOString(),
+            stats: groundingResult.stats,
+            hasStrongWarning: groundingResult.stats.strongWarnings > 0,
+          };
+        } catch (err) {
+          log.debug('Grounding check at solution submit skipped:', err);
+        }
+      }
+
+      if (isLastPhase(draft.currentPhase)) {
+        try {
+          const { emitEpistemicMetricsForCycle } = await import('../../telemetry/epistemicMetrics.js');
+          const snapshot = await emitEpistemicMetricsForCycle(draft, getProjectPath());
+          draft.epistemicMetricsAtCompletion = {
+            groundedRatio: snapshot.groundedRatio,
+            frontierShrinkRate: snapshot.frontierShrinkRate,
+            hypothesisRefutationRate: snapshot.hypothesisRefutationRate,
+            capturedAt: snapshot.capturedAt,
+          };
+        } catch (err) {
+          log.debug('Epistemic metrics emit skipped:', err);
+        }
+        return;
+      }
+
+      if (draft.currentPhase === 'discovery') {
+        try {
+          const { getMemoryCore } = await import('../../memory/auto/unified-memory-core.js');
+          const memCore = await getMemoryCore();
+          const fog = await memCore.getFogOfWar();
+          spawnedIds = await spawnReconTasksForBlockingUnknowns(draft, fog);
+          if (spawnedIds.length > 0) {
+            draft.spawnedReconTaskIds = [...(draft.spawnedReconTaskIds ?? []), ...spawnedIds];
+          }
+          const counts = summarizeBoundaryCounts(fog);
+          draft.frontierSnapshotAtDiscovery = {
+            ...counts,
+            capturedAt: new Date().toISOString(),
+          };
+        } catch (err) {
+          log.debug('Discovery frontier spawn skipped:', err);
+        }
+      }
+
+      draft.gateInstructionId = generateGateInstructionId();
+      draft.gateInstructionIssuedAt = new Date().toISOString();
+      draft.awaitingReflection = true;
+    });
+
+    if (this.isPersistFailure(commitResult)) {
+      return commitResult;
     }
+    const committed = commitResult.committed;
 
-    // Check if this is the last phase — no gate needed, complete
-    if (isLastPhase(state.currentPhase)) {
-      try {
-        const { emitEpistemicMetricsForCycle } = await import('../../telemetry/epistemicMetrics.js');
-        const snapshot = await emitEpistemicMetricsForCycle(state, getProjectPath());
-        state.epistemicMetricsAtCompletion = {
-          groundedRatio: snapshot.groundedRatio,
-          frontierShrinkRate: snapshot.frontierShrinkRate,
-          hypothesisRefutationRate: snapshot.hypothesisRefutationRate,
-          capturedAt: snapshot.capturedAt,
-        };
-      } catch (err) {
-        log.debug('Epistemic metrics emit skipped:', err);
+    if (isLastPhase(committed.currentPhase)) {
+      const fin = await this.finalizeIntoResponse(committed, this.generateInstruction(committed));
+      if (!fin.success) {
+        return fin;
       }
-
-      state.lastUpdatedAt = new Date().toISOString();
-      await this.saveState(state);
-      
       return {
         success: true,
         completed: true,
-        instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+        instruction: fin.instruction!,
       };
     }
-    
-    // v2: Set awaiting reflection instead of auto-transition
-    let spawnedIds: string[] | undefined;
 
-    if (state.currentPhase === 'discovery') {
-      try {
-        const { getMemoryCore } = await import('../../memory/auto/unified-memory-core.js');
-        const memCore = await getMemoryCore();
-        const fog = await memCore.getFogOfWar();
-        spawnedIds = await spawnReconTasksForBlockingUnknowns(state, fog);
-        if (spawnedIds.length > 0) {
-          state.spawnedReconTaskIds = [...(state.spawnedReconTaskIds ?? []), ...spawnedIds];
-        }
-        const counts = summarizeBoundaryCounts(fog);
-        state.frontierSnapshotAtDiscovery = {
-          ...counts,
-          capturedAt: new Date().toISOString(),
-        };
-      } catch (err) {
-        log.debug('Discovery frontier spawn skipped:', err);
-      }
+    log.debug(`Phase ${committed.currentPhase} complete, awaiting reflection gate`);
+
+    const fin = await this.finalizeIntoResponse(
+      committed,
+      await this.buildGateInstruction(committed, spawnedIds)
+    );
+    if (!fin.success) {
+      return fin;
     }
-
-    state.gateInstructionId = generateGateInstructionId();
-    state.gateInstructionIssuedAt = new Date().toISOString();
-    state.awaitingReflection = true;
-    state.lastUpdatedAt = new Date().toISOString();
-    await this.saveState(state);
-    
-    log.debug(`Phase ${state.currentPhase} complete, awaiting reflection gate`);
-    
     return {
       success: true,
-      instruction: await this.finalizeInstruction(
-        state,
-        await this.buildGateInstruction(state, spawnedIds)
-      ),
+      instruction: fin.instruction!,
     };
   }
   
@@ -299,27 +320,58 @@ export class CycleOrchestrator {
 
     const gateCheck = validateGateInstructionId(state.gateInstructionId, reflectionContent);
     if (!gateCheck.valid) {
+      const fin = await this.finalizeIntoResponse(
+        state,
+        await this.buildGateInstruction(state)
+      );
+      if (!fin.success) {
+        return fin;
+      }
       return {
         success: false,
         error: gateCheck.error,
-        instruction: await this.finalizeInstruction(state, await this.buildGateInstruction(state)),
+        instruction: fin.instruction,
       };
     }
     
-    // Parse reflection from content
-    const reflection = this.parseReflection(state.currentPhase, reflectionContent);
-    state.reflections.push(reflection);
-    state.awaitingReflection = false;
-    state.gateInstructionId = undefined;
-    state.gateInstructionIssuedAt = undefined;
+    // Parse reflection from content. A malformed reflection is rejected before
+    // any state mutation, so the cycle stays at the same gate with the same ID.
+    const parsedReflection = this.parseReflection(state.currentPhase, reflectionContent);
+    if (!parsedReflection.ok) {
+      log.warn(`Reflection rejected (phase: ${state.currentPhase}): ${parsedReflection.reason}`);
+      const fin = await this.finalizeIntoResponse(
+        state,
+        await this.buildGateInstruction(state)
+      );
+      if (!fin.success) {
+        return fin;
+      }
+      return {
+        success: false,
+        error:
+          `Reflection rejected: ${parsedReflection.reason}. ` +
+          'The cycle is still awaiting reflection for the same Gate-ID. ' +
+          'Resubmit a ```json block with gate_instruction_id, decision (continue | pivot | rewind | abort), summary and confidence.',
+        instruction: fin.instruction,
+      };
+    }
+    const reflection = parsedReflection.reflection;
+
+    const reflectionCommit = await this.withCommittedState(taskId, draft => {
+      draft.reflections.push(reflection);
+      draft.awaitingReflection = false;
+      draft.gateInstructionId = undefined;
+      draft.gateInstructionIssuedAt = undefined;
+    });
+    if (this.isPersistFailure(reflectionCommit)) {
+      return reflectionCommit;
+    }
+    const afterReflection = reflectionCommit.committed;
+
+    await this.appendReflectionToArtifact(afterReflection, reflection);
+    await this.logReflection(taskId, reflection);
     
-    // Append reflection section to the phase artifact file on disk
-    await this.appendReflectionToArtifact(state, reflection);
-    
-    // Write to REFLECTION_LOG.json
-    await this.logReflection(state.taskId, reflection);
-    
-    log.debug(`Reflection gate: ${reflection.decision} (phase: ${state.currentPhase}, confidence: ${reflection.confidence})`);
+    log.debug(`Reflection gate: ${reflection.decision} (phase: ${afterReflection.currentPhase}, confidence: ${reflection.confidence})`);
     
     // Safeguard: store pivot/abort decisions in L2 memory
     if (reflection.decision === 'pivot' || reflection.decision === 'abort') {
@@ -327,11 +379,11 @@ export class CycleOrchestrator {
         const { getMemoryCore } = await import('../../memory/auto/unified-memory-core.js');
         const memCore = await getMemoryCore();
         await memCore.store(
-          `[${reflection.decision.toUpperCase()}] Task: ${state.taskDescription.substring(0, 100)}. Phase: ${state.currentPhase}. Reason: ${reflection.summary}`,
+          `[${reflection.decision.toUpperCase()}] Task: ${afterReflection.taskDescription.substring(0, 100)}. Phase: ${afterReflection.currentPhase}. Reason: ${reflection.summary}`,
           {
             level: 'L2',
             source: 'runtime',
-            contextKeys: [state.taskId, state.currentPhase, reflection.decision],
+            contextKeys: [taskId, afterReflection.currentPhase, reflection.decision],
             confidence: 0.9,
           }
         );
@@ -343,35 +395,48 @@ export class CycleOrchestrator {
 
     switch (reflection.decision) {
       case 'continue':
-        return this.transitionToNextPhase(state);
+        return this.transitionToNextPhase(taskId);
       
       case 'pivot':
         if (reflection.taskFramingUpdate) {
-          state.taskFraming = reflection.taskFramingUpdate;
-          log.debug(`Task framing updated: ${state.taskFraming.substring(0, 80)}...`);
+          const pivotResult = await this.withCommittedState(taskId, draft => {
+            draft.taskFraming = reflection.taskFramingUpdate!;
+          });
+          if (this.isPersistFailure(pivotResult)) {
+            return pivotResult;
+          }
+          log.debug(`Task framing updated: ${reflection.taskFramingUpdate.substring(0, 80)}...`);
         }
-        return this.transitionToNextPhase(state);
+        return this.transitionToNextPhase(taskId);
       
       case 'rewind': {
-        const target = reflection.rewindTarget || this.getPreviousPhase(state.currentPhase);
+        const target = reflection.rewindTarget || this.getPreviousPhase(afterReflection.currentPhase);
         if (!target) {
-          return this.transitionToNextPhase(state); // can't rewind from intake
+          return this.transitionToNextPhase(taskId);
         }
-        return this.rewindToPhase(state, target);
+        return this.rewindToPhase(taskId, target);
       }
       
-      case 'abort':
-        state.lastUpdatedAt = new Date().toISOString();
-        await this.saveState(state);
+      case 'abort': {
+        const fin = await this.finalizeIntoResponse(
+          afterReflection,
+          this.generateInstruction(afterReflection)
+        );
+        if (!fin.success) {
+          return fin;
+        }
         return {
           success: true,
           completed: true,
-          instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+          instruction: fin.instruction!,
         };
+      }
       
-      default:
-        // Unknown decision — treat as continue
-        return this.transitionToNextPhase(state);
+      default: {
+        // validateDecision() guarantees the union is exhausted above.
+        const unreachable: never = reflection.decision;
+        return { success: false, error: `Unhandled reflection decision: ${String(unreachable)}` };
+      }
     }
   }
   
@@ -387,15 +452,26 @@ export class CycleOrchestrator {
     
     // v2: If awaiting reflection, return gate instruction
     if (state.awaitingReflection) {
+      const fin = await this.finalizeIntoResponse(
+        state,
+        await this.buildGateInstruction(state)
+      );
+      if (!fin.success) {
+        return fin;
+      }
       return {
         success: true,
-        instruction: await this.finalizeInstruction(state, await this.buildGateInstruction(state)),
+        instruction: fin.instruction!,
       };
     }
     
+    const fin = await this.finalizeIntoResponse(state, this.generateInstruction(state));
+    if (!fin.success) {
+      return fin;
+    }
     return {
       success: true,
-      instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+      instruction: fin.instruction!,
     };
   }
   
@@ -423,30 +499,43 @@ export class CycleOrchestrator {
   /**
    * Transition to the next phase after successful gate
    */
-  private async transitionToNextPhase(state: CycleState): Promise<CycleResponse> {
-    const nextPhase = getNextPhase(state.currentPhase);
-    
-    if (!nextPhase) {
-      state.lastUpdatedAt = new Date().toISOString();
-      await this.saveState(state);
+  private async transitionToNextPhase(taskId: string): Promise<CycleResponse> {
+    let cycleCompleted = false;
+    const result = await this.withCommittedState(taskId, draft => {
+      const nextPhase = getNextPhase(draft.currentPhase);
+      if (!nextPhase) {
+        cycleCompleted = true;
+        return;
+      }
+      draft.currentPhase = nextPhase;
+      resetPhaseMcpTracking(draft);
+      draft.phaseEnteredAt = new Date().toISOString();
+    });
+    if (this.isPersistFailure(result)) {
+      return result;
+    }
+    const state = result.committed;
+
+    if (cycleCompleted) {
+      const fin = await this.finalizeIntoResponse(state, this.generateInstruction(state));
+      if (!fin.success) {
+        return fin;
+      }
       return {
         success: true,
         completed: true,
-        instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+        instruction: fin.instruction!,
       };
     }
-    
-    state.currentPhase = nextPhase;
-    resetPhaseMcpTracking(state);
-    state.phaseEnteredAt = new Date().toISOString();
-    state.lastUpdatedAt = new Date().toISOString();
-    await this.saveState(state);
-    
-    log.debug(`Transitioned to phase: ${nextPhase}`);
-    
+
+    log.debug(`Transitioned to phase: ${state.currentPhase}`);
+    const fin = await this.finalizeIntoResponse(state, this.generateInstruction(state));
+    if (!fin.success) {
+      return fin;
+    }
     return {
       success: true,
-      instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+      instruction: fin.instruction!,
     };
   }
   
@@ -454,37 +543,47 @@ export class CycleOrchestrator {
    * Rewind to an earlier phase. Removes later phases from completedPhases.
    * Max 2 rewinds per phase to prevent infinite loops.
    */
-  private async rewindToPhase(state: CycleState, target: PhaseType): Promise<CycleResponse> {
+  private async rewindToPhase(taskId: string, target: PhaseType): Promise<CycleResponse> {
+    const current = await this.getState(taskId);
+    if (!current) {
+      return { success: false, error: `Cycle ${taskId} not found` };
+    }
+
     const targetOrder = PHASE_CONFIGS[target].order;
-    
-    // Guard: can't rewind forward
-    if (targetOrder >= PHASE_CONFIGS[state.currentPhase].order) {
-      return this.transitionToNextPhase(state);
+
+    if (targetOrder >= PHASE_CONFIGS[current.currentPhase].order) {
+      return this.transitionToNextPhase(taskId);
     }
-    
-    // Guard: max rewinds
-    state.phaseAttempts[target] = (state.phaseAttempts[target] || 0) + 1;
-    if (state.phaseAttempts[target] > 2) {
+
+    const nextAttempts = (current.phaseAttempts[target] || 0) + 1;
+    if (nextAttempts > 2) {
       log.warn(`Max rewinds reached for ${target}, forcing continue`);
-      return this.transitionToNextPhase(state);
+      return this.transitionToNextPhase(taskId);
     }
-    
-    // Remove all phases after target from completedPhases
-    state.completedPhases = state.completedPhases.filter(p => {
-      return PHASE_CONFIGS[p].order < targetOrder;
+
+    const result = await this.withCommittedState(taskId, draft => {
+      draft.phaseAttempts[target] = nextAttempts;
+      draft.completedPhases = draft.completedPhases.filter(p => {
+        return PHASE_CONFIGS[p].order < targetOrder;
+      });
+      draft.currentPhase = target;
+      resetPhaseMcpTracking(draft);
+      draft.phaseEnteredAt = new Date().toISOString();
     });
-    
-    state.currentPhase = target;
-    resetPhaseMcpTracking(state);
-    state.phaseEnteredAt = new Date().toISOString();
-    state.lastUpdatedAt = new Date().toISOString();
-    await this.saveState(state);
-    
+    if (this.isPersistFailure(result)) {
+      return result;
+    }
+    const state = result.committed;
+
     log.debug(`Rewound to phase: ${target}`);
-    
+
+    const fin = await this.finalizeIntoResponse(state, this.generateInstruction(state));
+    if (!fin.success) {
+      return fin;
+    }
     return {
       success: true,
-      instruction: await this.finalizeInstruction(state, this.generateInstruction(state)),
+      instruction: fin.instruction!,
     };
   }
   
@@ -628,47 +727,57 @@ mcp_m7_cycle task_id="${state.taskId}" artifact_content="<ваш reflection JSON
   }
 
   /**
-   * Parse reflection JSON from content. Falls back to auto-CONTINUE on parse failure.
+   * Parse reflection JSON from content (may be wrapped in a markdown code block).
+   * Returns ok:false when the content is not JSON, not an object, or has no
+   * recognised decision. No default decision is ever substituted: the caller
+   * must reject the submission and keep the cycle at the current gate.
    */
-  private parseReflection(phase: PhaseType, content: string): ReflectionGate {
-    const defaultReflection: ReflectionGate = {
-      phase,
-      decision: 'continue',
-      changeDetected: false,
-      summary: 'Auto-continue (no reflection provided)',
-      confidence: 1.0,
-      timestamp: new Date().toISOString()
-    };
-    
+  private parseReflection(phase: PhaseType, content: string): ParsedReflection {
+    const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+    const jsonStr = jsonMatch ? jsonMatch[1].trim() : content.trim();
+
+    let parsed: unknown;
     try {
-      // Try to extract JSON from content (may be wrapped in markdown code block)
-      const jsonMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-      const jsonStr = jsonMatch ? jsonMatch[1].trim() : content.trim();
-      
-      const parsed = JSON.parse(jsonStr);
-      
-      const decision = this.validateDecision(parsed.decision);
-      
+      parsed = JSON.parse(jsonStr);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: `reflection is not valid JSON (${message})` };
+    }
+
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: 'reflection JSON must be an object' };
+    }
+    const obj = parsed as Record<string, unknown>;
+
+    const decision = this.validateDecision(obj.decision);
+    if (!decision) {
       return {
+        ok: false,
+        reason: `unknown decision ${JSON.stringify(obj.decision ?? null)}; expected one of continue, pivot, rewind, abort`,
+      };
+    }
+
+    return {
+      ok: true,
+      reflection: {
         phase,
         decision,
-        changeDetected: Boolean(parsed.change_detected),
-        summary: String(parsed.summary || ''),
-        taskFramingUpdate: parsed.task_framing_update ? String(parsed.task_framing_update) : undefined,
-        rewindTarget: parsed.rewind_target ? this.validatePhase(parsed.rewind_target) : undefined,
-        confidence: typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
-        timestamp: new Date().toISOString()
-      };
-    } catch (err) {
-      log.warn(`Failed to parse reflection, auto-continuing: ${err}`);
-      return defaultReflection;
-    }
+        changeDetected: Boolean(obj.change_detected),
+        summary: String(obj.summary || ''),
+        taskFramingUpdate: obj.task_framing_update ? String(obj.task_framing_update) : undefined,
+        rewindTarget: obj.rewind_target ? this.validatePhase(obj.rewind_target) : undefined,
+        confidence: typeof obj.confidence === 'number' ? Math.max(0, Math.min(1, obj.confidence)) : 0.5,
+        timestamp: new Date().toISOString(),
+      },
+    };
   }
   
-  private validateDecision(raw: unknown): ReflectionDecision {
+  /** Returns null for anything that is not one of the four known decisions. */
+  private validateDecision(raw: unknown): ReflectionDecision | null {
+    if (typeof raw !== 'string') return null;
     const valid: ReflectionDecision[] = ['continue', 'pivot', 'rewind', 'abort'];
-    const str = String(raw).toLowerCase().trim();
-    return valid.includes(str as ReflectionDecision) ? (str as ReflectionDecision) : 'continue';
+    const str = raw.toLowerCase().trim();
+    return valid.includes(str as ReflectionDecision) ? (str as ReflectionDecision) : null;
   }
   
   private validatePhase(raw: unknown): PhaseType | undefined {
@@ -833,17 +942,101 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
   private async finalizeInstruction(
     state: CycleState,
     instruction: CycleInstruction
-  ): Promise<CycleInstruction> {
-    const track = trackPhaseMcpCall(state);
-    state.lastUpdatedAt = new Date().toISOString();
-    await this.saveState(state);
+  ): Promise<CycleInstruction | CycleResponse> {
+    const draft = structuredClone(state);
+    const track = trackPhaseMcpCall(draft);
+    draft.lastUpdatedAt = new Date().toISOString();
+    try {
+      await this.commitState(draft);
+    } catch (err) {
+      return this.persistErrorResponse(err);
+    }
 
     if (track.shouldReinject) {
-      const block = buildRuleReinjectionBlock(state, getPhaseConfig(state.currentPhase));
+      const block = buildRuleReinjectionBlock(draft, getPhaseConfig(draft.currentPhase));
       instruction.instruction = appendRuleReinjection(instruction.instruction, block);
     }
 
     return instruction;
+  }
+
+  private async finalizeIntoResponse(
+    state: CycleState,
+    instruction: CycleInstruction
+  ): Promise<CycleResponse> {
+    const result = await this.finalizeInstruction(state, instruction);
+    if ('success' in result && result.success === false) {
+      return result;
+    }
+    return { success: true, instruction: result as CycleInstruction };
+  }
+
+  private cycleStatePath(taskId: string): string {
+    return path.join(this.cyclesDir, `${taskId}.json`);
+  }
+
+  private persistErrorResponse(err: unknown): CycleResponse {
+    const msg =
+      err instanceof StatePersistError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return { success: false, error: `State not persisted: ${msg}` };
+  }
+
+  private isPersistFailure(
+    result: CycleResponse | { committed: CycleState }
+  ): result is CycleResponse {
+    return 'success' in result && result.success === false;
+  }
+
+  private async commitState(next: CycleState): Promise<void> {
+    await fs.mkdir(this.cyclesDir, { recursive: true });
+    const statePath = this.cycleStatePath(next.taskId);
+    const result = await atomicWriteJSON(statePath, next);
+    if (!result.success) {
+      throw new StatePersistError(statePath, result.error ?? 'unknown error');
+    }
+    this.cycles.set(next.taskId, next);
+  }
+
+  private async withCommittedState(
+    taskId: string,
+    mutate: (draft: CycleState) => void
+  ): Promise<CycleResponse | { committed: CycleState }> {
+    const current = await this.getState(taskId);
+    if (!current) {
+      return { success: false, error: `Cycle ${taskId} not found` };
+    }
+    const draft = structuredClone(current);
+    mutate(draft);
+    draft.lastUpdatedAt = new Date().toISOString();
+    try {
+      await this.commitState(draft);
+    } catch (err) {
+      return this.persistErrorResponse(err);
+    }
+    return { committed: draft };
+  }
+
+  private async withCommittedStateAsync(
+    taskId: string,
+    mutate: (draft: CycleState) => Promise<void>
+  ): Promise<CycleResponse | { committed: CycleState }> {
+    const current = await this.getState(taskId);
+    if (!current) {
+      return { success: false, error: `Cycle ${taskId} not found` };
+    }
+    const draft = structuredClone(current);
+    await mutate(draft);
+    draft.lastUpdatedAt = new Date().toISOString();
+    try {
+      await this.commitState(draft);
+    } catch (err) {
+      return this.persistErrorResponse(err);
+    }
+    return { committed: draft };
   }
 
   /**
@@ -948,32 +1141,21 @@ ${progressBar}`.trim();
   }
   
   private async getState(taskId: string): Promise<CycleState | null> {
-    // Try memory first
     if (this.cycles.has(taskId)) {
       return this.migrateState(this.cycles.get(taskId)!);
     }
-    
-    // Try disk
-    const statePath = path.join(this.cyclesDir, `${taskId}.json`);
-    try {
-      const content = await fs.readFile(statePath, 'utf-8');
-      const state = this.migrateState(JSON.parse(content) as CycleState);
-      this.cycles.set(taskId, state);
-      return state;
-    } catch {
+
+    const statePath = this.cycleStatePath(taskId);
+    const { data, recoveredFrom } = await safeReadJSON<CycleState>(statePath);
+    if (!data) {
       return null;
     }
-  }
-  
-  private async saveState(state: CycleState): Promise<void> {
-    try {
-      await fs.mkdir(this.cyclesDir, { recursive: true });
-      const statePath = path.join(this.cyclesDir, `${state.taskId}.json`);
-      await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
-      this.cycles.set(state.taskId, state);
-    } catch (err) {
-      log.warn(`Failed to save cycle state: ${err}`);
+    if (recoveredFrom) {
+      log.info(`Cycle state recovered from ${recoveredFrom}`);
     }
+    const state = this.migrateState(data);
+    this.cycles.set(taskId, state);
+    return state;
   }
 
   /**

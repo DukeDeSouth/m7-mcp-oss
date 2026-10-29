@@ -1,6 +1,6 @@
 # Contributing to M7 MCP
 
-This repository is a public snapshot of a project that is developed privately (see [README.md](README.md)). Contributions are accepted; the maintainer reviews them without a fixed schedule. Before investing significant effort, open an issue describing the change.
+This repository is a public snapshot of a project that is developed privately (see [README.md](README.md)). Contributions are accepted; the maintainer reviews them without a fixed schedule. Before investing significant effort, open an issue describing the change, or pick an item from [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and reference its ID in the issue.
 
 ## Prerequisites
 

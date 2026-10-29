@@ -13,6 +13,21 @@ unfinished experimental module, and telemetry upload is now opt-in (no default
 endpoint; set `M7_TELEMETRY_ENDPOINT` to use your own collector). Entries below
 that mention those pieces describe history, not what ships here.
 
+## [3.18.1] - 2026-10-29
+
+Stage 1 community fix sprint (batch 1) — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+
+### Fixed
+- CYC-1, STATE-1, STATE-2, MEM-3 (details in entries below under prior Unreleased)
+
+## [Unreleased]
+
+### Fixed
+- Cycle orchestrator: a reflection that is not JSON, not an object, or has no recognised `decision` is now rejected with an error and the cycle stays at the same gate with the same Gate-ID. Previously it was treated as `continue` with confidence 1.0 and advanced the phase (KNOWN_ISSUES CYC-1). Clients that relied on sending prose instead of the JSON block must now send the block.
+- Task orchestrator: `complete_session` now refuses unless the session is on the validation phase with all validation requirements marked complete, unless `force: true` is passed (KNOWN_ISSUES STATE-2). Early completion no longer succeeds silently; forced completion is recorded on the session.
+- Cycle orchestrator: failed writes to `.m7/cycles/<taskId>.json` no longer report success — `commitState` uses `atomicWriteJSON` and returns `State not persisted: …` without advancing `completedPhases`; `safeReadJSON` tries backups when the main file JSON is corrupt (KNOWN_ISSUES STATE-1).
+- Server shutdown: graceful exit now awaits a flush of debounced memory (and journal) writes for up to 2 seconds before `process.exit`, so L2/L3 stores are not lost when the MCP client disconnects within the debounce window (KNOWN_ISSUES MEM-3).
+
 ## [Unreleased — prior epistemic work]
 
 ### Added

@@ -3,6 +3,7 @@ dist/
 .env
 .env.local
 .m7/
+m7-cycles/
 *.log
 *.pid
 .DS_Store

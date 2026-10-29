@@ -15,11 +15,31 @@ const log = M7_DEBUG ? console.error : () => {};
 // When Cursor IDE closes the MCP client, the server process receives
 // SIGPIPE or EPIPE on stdout write. Without handlers, Node.js crashes.
 let _shutdownRequested = false;
+let _shutdownInProgress: Promise<void> | null = null;
+
+async function gracefulExitAsync(): Promise<void> {
+  if (_shutdownRequested) {
+    if (_shutdownInProgress) {
+      await _shutdownInProgress;
+    }
+    return;
+  }
+  _shutdownRequested = true;
+  if (!_shutdownInProgress) {
+    _shutdownInProgress = (async () => {
+      const { flushAllWithTimeout } = await import('./core/shutdown/flushOnExit.js');
+      const result = await flushAllWithTimeout();
+      if (result === 'timeout' && M7_DEBUG) {
+        log('[M7] Shutdown flush timed out');
+      }
+      process.exit(0);
+    })();
+  }
+  await _shutdownInProgress;
+}
 
 function gracefulExit(): void {
-  if (_shutdownRequested) return;
-  _shutdownRequested = true;
-  process.exit(0);
+  void gracefulExitAsync();
 }
 
 // Ignore SIGPIPE — broken pipe from client disconnect
@@ -123,6 +143,7 @@ import { generateIntelligentHints, addHintsToResponse } from './core/utils/hintG
 import { extractZodSchema } from './core/utils/schemaConverter.js';
 // Import project path utility
 import { getProjectPath, getProjectPathDiagnostics, initFromMcpRoots, onProjectPathChange, bindMcpServerForRoots, ensureProjectPathResolved } from './core/utils/projectPath.js';
+import { registerShutdownContributor } from './core/shutdown/flushOnExit.js';
 class M7MCPServer {
   private server: McpServer;
   private memory: MemorySystem;
@@ -168,6 +189,7 @@ class M7MCPServer {
     // Initialize core systems with project path
     this.memory = new MemorySystem(this.projectPath);
     this.journal = new JournalSystem(this.projectPath);
+    registerShutdownContributor(() => this.journal.shutdown());
     this.schema = new SchemaSystem(this.journal, this.projectPath);
     this.router = new TaskRouter();
     this.orchestrator = new TaskOrchestrator(this.journal);
@@ -900,7 +922,8 @@ const server = new M7MCPServer();
 server.run().catch(err => {
   // v8.1: Exit cleanly on pipe errors
   if (err?.code === 'EPIPE' || err?.code === 'ERR_STREAM_DESTROYED') {
-    process.exit(0);
+    gracefulExit();
+    return;
   }
   if (M7_DEBUG) {
     try { process.stderr.write(`[M7] Fatal: ${err.message}\n`); } catch { /* pipe broken */ }

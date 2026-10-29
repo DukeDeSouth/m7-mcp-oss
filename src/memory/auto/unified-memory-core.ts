@@ -1264,6 +1264,11 @@ export class UnifiedMemoryCore {
       },
     };
   }
+
+  /** MEM-3: flush debounced memory writes on shutdown */
+  async shutdown(): Promise<void> {
+    await this.memorySystem.shutdown();
+  }
 }
 
 // ============================================================================
@@ -1303,6 +1308,16 @@ export async function getMemoryCore(projectPath?: string): Promise<UnifiedMemory
     await memoryCore.initialize();
   }
   return memoryCore;
+}
+
+/**
+ * MEM-3: Flush pending writes for the active memory core without creating a new instance.
+ */
+export async function shutdownMemoryCore(): Promise<void> {
+  if (!memoryCore) {
+    return;
+  }
+  await memoryCore.shutdown();
 }
 
 /**

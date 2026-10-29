@@ -325,6 +325,36 @@ async function verifyWrittenData(
   }
 }
 
+function tryParseJsonBuffer<T>(buf: Buffer): T | null {
+  try {
+    return JSON.parse(buf.toString('utf-8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read backup files (.bak.1 … .bak.N) in order. First readable backup wins.
+ */
+export async function readBackups(
+  filePath: string,
+  config: Partial<AtomicWriteConfig> = {}
+): Promise<{ data: Buffer; recoveredFrom: string } | null> {
+  const cfg = { ...DEFAULT_ATOMIC_CONFIG, ...config };
+
+  for (let i = 1; i <= cfg.maxBackups; i++) {
+    const backupPath = `${filePath}${cfg.backupSuffix}.${i}`;
+    try {
+      const data = await fs.readFile(backupPath);
+      log.info(`Recovered data from backup: ${backupPath}`);
+      return { data, recoveredFrom: backupPath };
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
 /**
  * Safe read with automatic recovery from backup if main file is corrupted.
  */
@@ -332,54 +362,68 @@ export async function safeRead(
   filePath: string,
   config: Partial<AtomicWriteConfig> = {}
 ): Promise<{ data: Buffer | null; recoveredFrom?: string; error?: string }> {
-  // Try main file first
   try {
     const data = await fs.readFile(filePath);
     return { data };
-  } catch (mainError) {
+  } catch {
     log.warn(`Main file read failed: ${filePath}, trying backups...`);
   }
-  
-  // Try backups in order
-  const cfg = { ...DEFAULT_ATOMIC_CONFIG, ...config };
-  
-  for (let i = 1; i <= cfg.maxBackups; i++) {
-    const backupPath = `${filePath}${cfg.backupSuffix}.${i}`;
-    
-    try {
-      const data = await fs.readFile(backupPath);
-      log.info(`Recovered data from backup: ${backupPath}`);
-      return { data, recoveredFrom: backupPath };
-    } catch {
-      // Try next backup
-    }
+
+  const backup = await readBackups(filePath, config);
+  if (backup) {
+    return { data: backup.data, recoveredFrom: backup.recoveredFrom };
   }
-  
+
   return { data: null, error: 'No readable file or backup found' };
 }
 
 /**
- * Safe read JSON with automatic recovery.
+ * Safe read JSON with automatic recovery (read failure or JSON parse failure on main).
  */
 export async function safeReadJSON<T = unknown>(
   filePath: string,
   config: Partial<AtomicWriteConfig> = {}
 ): Promise<{ data: T | null; recoveredFrom?: string; error?: string }> {
-  const result = await safeRead(filePath, config);
-  
-  if (result.data) {
-    try {
-      const parsed = JSON.parse(result.data.toString('utf-8')) as T;
-      return { data: parsed, recoveredFrom: result.recoveredFrom };
-    } catch (parseError) {
-      return { 
-        data: null, 
-        error: `JSON parse error: ${parseError instanceof Error ? parseError.message : parseError}` 
-      };
-    }
+  const cfg = { ...DEFAULT_ATOMIC_CONFIG, ...config };
+  let mainBuf: Buffer | null = null;
+
+  try {
+    mainBuf = await fs.readFile(filePath);
+  } catch {
+    // missing or unreadable main — fall through to backups
   }
-  
-  return { data: null, error: result.error };
+
+  if (mainBuf !== null) {
+    const parsed = tryParseJsonBuffer<T>(mainBuf);
+    if (parsed !== null) {
+      return { data: parsed };
+    }
+    log.warn(`Main file JSON parse failed: ${filePath}, trying backups...`);
+    for (let i = 1; i <= cfg.maxBackups; i++) {
+      const backupPath = `${filePath}${cfg.backupSuffix}.${i}`;
+      try {
+        const bbuf = await fs.readFile(backupPath);
+        const bparsed = tryParseJsonBuffer<T>(bbuf);
+        if (bparsed !== null) {
+          log.info(`Recovered JSON from backup: ${backupPath}`);
+          return { data: bparsed, recoveredFrom: backupPath };
+        }
+      } catch {
+        // next backup
+      }
+    }
+    return { data: null, error: 'JSON parse error on main file and no valid backup' };
+  }
+
+  const backup = await readBackups(filePath, config);
+  if (!backup) {
+    return { data: null, error: 'No readable file or backup found' };
+  }
+  const parsed = tryParseJsonBuffer<T>(backup.data);
+  if (parsed === null) {
+    return { data: null, error: 'Backup readable but JSON invalid' };
+  }
+  return { data: parsed, recoveredFrom: backup.recoveredFrom };
 }
 
 // ============================================
@@ -392,6 +436,7 @@ export default {
   listBackups,
   restoreFromBackup,
   cleanupBackups,
+  readBackups,
   safeRead,
   safeReadJSON,
 };

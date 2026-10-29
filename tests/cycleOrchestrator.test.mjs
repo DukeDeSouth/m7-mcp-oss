@@ -386,18 +386,88 @@ describe('Reflection Gates', () => {
       '3rd rewind should be blocked — forced to next phase');
   });
 
-  it('invalid JSON in reflection → auto-continue', async () => {
+  // Malformed reflections must be rejected without touching the gate.
+  // The error text is asserted by prefix so that a Gate-ID mismatch
+  // (a different rejection path) cannot make these tests pass by accident.
+
+  async function startAwaitingGate() {
     const orch = new CycleOrchestrator();
     const start = await orch.startCycle('Test invalid reflection');
-    
     await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
-    const result = await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
-      `## Gate-ID: ${gateId}\n\nthis is not valid json at all`
-    );
-    
-    assert.ok(result.success, 'Should succeed with auto-continue');
-    assert.equal(result.instruction.phase.name, 'discovery',
-      'Auto-continue should advance to DISCOVERY');
+    const gateBefore = gateIdFromResponse(await orch.getCurrentInstruction(start.taskId));
+    assert.ok(gateBefore, 'Gate-ID must be present when awaiting reflection');
+    return { orch, taskId: start.taskId, gateBefore };
+  }
+
+  async function assertStillAtGate(orch, taskId, gateBefore) {
+    const after = await orch.getCurrentInstruction(taskId);
+    assert.ok(after.success);
+    assert.equal(after.instruction.phase.name, 'intake', 'Phase must not advance');
+    assert.equal(gateIdFromResponse(after), gateBefore, 'Gate-ID must be unchanged');
+  }
+
+  it('invalid JSON in reflection → rejected, gate unchanged', async () => {
+    const { orch, taskId, gateBefore } = await startAwaitingGate();
+
+    const result = await orch.submitReflection(taskId,
+      `## Gate-ID: ${gateBefore}\n\nthis is not valid json at all`);
+
+    assert.equal(result.success, false, 'Malformed reflection must not be accepted');
+    assert.match(result.error, /^Reflection rejected: reflection is not valid JSON/);
+    await assertStillAtGate(orch, taskId, gateBefore);
+  });
+
+  it('unknown decision "proceed" → rejected, gate unchanged', async () => {
+    const { orch, taskId, gateBefore } = await startAwaitingGate();
+
+    const result = await orch.submitReflection(taskId, '```json\n' + JSON.stringify({
+      gate_instruction_id: gateBefore,
+      decision: 'proceed',
+      summary: 'typo in decision',
+      confidence: 0.9,
+    }) + '\n```');
+
+    assert.equal(result.success, false, 'Unknown decision must not be accepted');
+    assert.match(result.error, /^Reflection rejected: unknown decision "proceed"/);
+    await assertStillAtGate(orch, taskId, gateBefore);
+  });
+
+  it('missing decision → rejected, gate unchanged', async () => {
+    const { orch, taskId, gateBefore } = await startAwaitingGate();
+
+    const result = await orch.submitReflection(taskId, '```json\n' + JSON.stringify({
+      gate_instruction_id: gateBefore,
+      summary: 'forgot the decision field',
+      confidence: 0.9,
+    }) + '\n```');
+
+    assert.equal(result.success, false, 'Reflection without decision must not be accepted');
+    assert.match(result.error, /^Reflection rejected: unknown decision null/);
+    await assertStillAtGate(orch, taskId, gateBefore);
+  });
+
+  it('valid reflection is accepted after a rejected one with the same Gate-ID', async () => {
+    const { orch, taskId, gateBefore } = await startAwaitingGate();
+
+    const rejected = await orch.submitReflection(taskId,
+      `## Gate-ID: ${gateBefore}\n\nstill not json`);
+    assert.equal(rejected.success, false);
+
+    const accepted = await orch.submitReflection(taskId,
+      makeReflection('continue', 'Second attempt, well-formed', gateBefore));
+    assert.ok(accepted.success, 'Well-formed retry must be accepted');
+    assert.equal(accepted.instruction.phase.name, 'discovery',
+      'Accepted continue should advance to DISCOVERY');
+  });
+
+  it('decision is case- and whitespace-tolerant', async () => {
+    const { orch, taskId, gateBefore } = await startAwaitingGate();
+
+    const result = await orch.submitReflection(taskId,
+      makeReflection(' Continue ', 'Odd casing but valid', gateBefore));
+
+    assert.ok(result.success);
+    assert.equal(result.instruction.phase.name, 'discovery');
   });
 
   it('reflection without awaiting → error', async () => {
@@ -1054,6 +1124,34 @@ describe('rule reinjection', () => {
       !discovery.instruction.instruction.includes('M7 Rule Reinjection'),
       'First discovery call should not inherit inject from intake'
     );
+  });
+});
+
+describe('STATE-1 persist failure', () => {
+  it('submitArtifact with read-only cyclesDir → success false, completedPhases unchanged', async () => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    const projectPath = process.env.M7_PROJECT_PATH || path.join(import.meta.dirname, '..');
+    const cyclesPath = path.join(projectPath, '.m7', 'cycles');
+    await fs.mkdir(cyclesPath, { recursive: true });
+
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('STATE-1 persist failure test');
+    const taskId = start.taskId;
+    const beforeCompleted = start.progress.completed;
+    const statePath = path.join(projectPath, '.m7', 'cycles', `${taskId}.json`);
+
+    await fs.chmod(cyclesPath, 0o500);
+    try {
+      const result = await orch.submitArtifact(taskId, fakeArtifact('intake'));
+      assert.equal(result.success, false);
+      assert.match(result.error, /State not persisted/i);
+      const onDisk = JSON.parse(await fs.readFile(statePath, 'utf-8'));
+      assert.equal(onDisk.completedPhases.length, beforeCompleted);
+    } finally {
+      await fs.chmod(cyclesPath, 0o755);
+    }
   });
 });
 
