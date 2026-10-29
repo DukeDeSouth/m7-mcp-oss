@@ -24,7 +24,7 @@ Items marked `good first issue` are self-contained and need no knowledge of the 
 
 | ID | Title | Severity | Stage | Labels | Status |
 |---|---|---|---|---|---|
-| CYC-1 | Unparseable reflection is treated as `continue` with confidence 1.0 | high | 1 | bug, help wanted | open |
+| CYC-1 | Unparseable reflection is treated as `continue` with confidence 1.0 | high | 1 | bug, help wanted | fixed in #5 |
 | CYC-2 | Artifact submission is neither idempotent nor serialized | medium | 2 | bug, help wanted | open |
 | CYC-3 | A finished or aborted cycle is not terminal | medium | 2 | bug | open |
 | CYC-4 | Cycle state and artifact files can land in different projects | medium | 2 | bug | open |
@@ -33,12 +33,12 @@ Items marked `good first issue` are self-contained and need no knowledge of the 
 | CYC-7 | Re-submitting an artifact overwrites the previous file without trace | medium | 1 | bug, good first issue | open |
 | CYC-8 | Registry append never deduplicates | low | 3 | bug, good first issue | open |
 | CYC-9 | Cleanup deletes cycle state by age alone | high | 1 | bug | open |
-| STATE-1 | Failed state write is reported as success; backups are never consulted for corrupt files | high | 1 | bug, help wanted | open |
-| STATE-2 | `complete_session` has no phase guard | high | 1 | bug | open |
+| STATE-1 | Failed state write is reported as success; backups are never consulted for corrupt files | high | 1 | bug, help wanted | fixed in #5 |
+| STATE-2 | `complete_session` has no phase guard | high | 1 | bug | fixed in #5 |
 | MEM-0 | Tracking: one read path for memory | medium | 2 | bug, help wanted | open |
 | MEM-1 | `invalidate_bulk` mutates in memory only | high | 1 | bug, good first issue | open |
 | MEM-2 | Confidence `0` becomes `0.5` on load | high | 1 | bug, good first issue | open |
-| MEM-3 | Pending memory writes are dropped on shutdown | high | 1 | bug | open |
+| MEM-3 | Pending memory writes are dropped on shutdown | high | 1 | bug | fixed in #5 |
 | MEM-4 | Loading more than 2000 long-term records evicts and then rewrites the file | high | 1 | bug | open |
 | GRAPH-1 | Depth-limited DFS marks nodes visited at the wrong depth | medium | 2 | bug, good first issue | open |
 | GRAPH-2 | Transfer task IDs can collide and overwrite | low | 2 | bug, good first issue | open |
