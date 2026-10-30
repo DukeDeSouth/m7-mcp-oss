@@ -8,7 +8,7 @@
 import { createLogger } from '../utils/logger.js';
 import { z } from 'zod';
 import { getCycleOrchestrator } from '../orchestrator/cycleOrchestrator.js';
-import { CycleInstruction } from '../orchestrator/types/cycle.js';
+import { CycleInstruction, CycleStatus, PhaseType } from '../orchestrator/types/cycle.js';
 
 const log = createLogger('[cycleTool]');
 
@@ -121,10 +121,13 @@ export const cycleTool = {
       }
       
       if (result.completed) {
+        const status: CycleStatus = result.cycleStatus ?? 'completed';
+        const stoppedAt: PhaseType = result.instruction?.phase.name ?? 'implementation';
+        const completedCount = result.instruction?.progress.completed ?? 7;
         return {
           content: [{
             type: 'text',
-            text: formatCompletionResponse(task_id)
+            text: formatCompletionResponse(task_id, status, stoppedAt, completedCount)
           }]
         };
       }
@@ -218,7 +221,38 @@ ${gateSection}
 `;
 }
 
-function formatCompletionResponse(taskId: string): string {
+export function formatCompletionResponse(
+  taskId: string,
+  status: CycleStatus,
+  stoppedAtPhase: PhaseType,
+  completedPhaseCount = 7
+): string {
+  if (status === 'aborted') {
+    const completed = Math.min(completedPhaseCount, 7);
+    return `# M7 CYCLE ABORTED
+
+**Task ID:** \`${taskId}\`
+
+## Progress: ${generateVisualProgress(completed, 7)}
+
+---
+
+The cycle was **aborted** at phase **${stoppedAtPhase.toUpperCase()}** (${stoppedAtPhase}).
+
+No further artifacts or reflection gates will be accepted for this task ID.
+
+---
+
+## OPTIONAL: Register Summary
+
+If useful for your registry, you may still register a short summary:
+
+\`\`\`
+mcp_m7_cycle task_id="${taskId}" summary="your 4-5 word summary"
+\`\`\`
+`;
+  }
+
   return `# M7 CYCLE COMPLETE
 
 **Task ID:** \`${taskId}\`

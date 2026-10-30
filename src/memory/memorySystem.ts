@@ -42,9 +42,18 @@ export interface MemoryLevel {
 }
 
 export class MemorySystem {
+  private static readonly DEFAULT_CAPS = {
+    longterm: 2000,
+    conceptual: 1000,
+  } as const;
+
   private storage: MemoryLevel;
   private fogOfWar: Map<string, FogOfWarEntry>;
   private dataPath: string;
+  /** MEM-4: entry count loaded from disk per persisted level */
+  private loadedEntryCount: Partial<Record<'longterm' | 'conceptual', number>> = {};
+  /** MEM-4: explicit deletes since last load (for persist guard) */
+  private explicitDeletes: Partial<Record<'longterm' | 'conceptual', number>> = {};
   
   // v3.9: Batched writes with debounce
   private pendingWrites: Map<string, { level: string; data: any }> = new Map();
@@ -163,6 +172,19 @@ export class MemorySystem {
     };
   }
 
+  private resizeStorageCap(level: 'longterm' | 'conceptual', minFromFile: number): void {
+    const map = this.storage[level];
+    const floor = MemorySystem.DEFAULT_CAPS[level];
+    // Headroom +1 so a single store after load does not evict a loaded row (MEM-4 acceptance)
+    const target =
+      minFromFile > 0
+        ? Math.max(floor, minFromFile + 1)
+        : floor;
+    if (map instanceof BoundedMap && target > map.capacity) {
+      map.setMaxSize(target);
+    }
+  }
+
   private async loadPersistedMemory() {
     try {
       // v3.10: Use safe read with automatic backup recovery
@@ -196,10 +218,19 @@ export class MemorySystem {
         const levelPath = `${this.dataPath}/memory/${level}.json`;
         const levelResult = await safeReadJSON<Record<string, any>>(levelPath);
         if (levelResult.data) {
-          // v9.1: Preserve BoundedMap — clear and repopulate instead of replacing
+          this.explicitDeletes[level] = 0;
+          const entries = levelResult.data;
+          const n = Object.keys(entries).length;
+          this.resizeStorageCap(level, n);
           this.storage[level].clear();
-          for (const [k, v] of Object.entries(levelResult.data)) {
+          for (const [k, v] of Object.entries(entries)) {
             this.storage[level].set(k, v);
+          }
+          this.loadedEntryCount[level] = n;
+          if (n > MemorySystem.DEFAULT_CAPS[level]) {
+            log.info(
+              `MemorySystem] ${level} loaded ${n} entries (above default cap ${MemorySystem.DEFAULT_CAPS[level]})`
+            );
           }
           if (levelResult.recoveredFrom) {
             log.warn(`${level} memory recovered from backup: ${levelResult.recoveredFrom}`);
@@ -399,6 +430,9 @@ export class MemorySystem {
       const existed = levelStorage.has(key);
       if (existed) {
         levelStorage.delete(key);
+        if (level === 'longterm' || level === 'conceptual') {
+          this.explicitDeletes[level] = (this.explicitDeletes[level] ?? 0) + 1;
+        }
         // Cancel pending write for this key to prevent race condition
         this.pendingWrites.delete(`${level}:${key}`);
         // Immediate persist — not debounced
@@ -434,11 +468,29 @@ export class MemorySystem {
 
   private async persistLevel(level: string) {
     try {
+      if (level === 'longterm' || level === 'conceptual') {
+        const persisted = level as 'longterm' | 'conceptual';
+        const loaded = this.loadedEntryCount[persisted] ?? 0;
+        const deleted = this.explicitDeletes[persisted] ?? 0;
+        const expectedMin = loaded - deleted;
+        const map = this.storage[persisted];
+        if (map.size < expectedMin) {
+          log.error(
+            `MemorySystem] Refusing to persist ${level}: in-memory size ${map.size} < expected ${expectedMin} (possible load truncation)`
+          );
+          return;
+        }
+      }
+
       const levelPath = `${this.dataPath}/memory/${level}.json`;
       const data = Object.fromEntries(
         this.storage[level as keyof Omit<MemoryLevel, 'project'>].entries()
       );
       await this.writeFile(levelPath, JSON.stringify(data, null, 2));
+
+      if (level === 'longterm' || level === 'conceptual') {
+        this.loadedEntryCount[level] = this.storage[level].size;
+      }
     } catch (error) {
       log.error(`Failed to persist ${level} memory:`, error);
     }

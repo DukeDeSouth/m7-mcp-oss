@@ -20,13 +20,25 @@ Stage 1 community fix sprint (batch 1) — see [docs/COMMUNITY_SPRINT.md](docs/C
 ### Fixed
 - CYC-1, STATE-1, STATE-2, MEM-3 (details in entries below under prior Unreleased)
 
-## [Unreleased]
+## [3.19.0] - 2026-10-30
+
+Stage 1 remainder + Stage 2 cycle protocol — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md) (batch 2).
 
 ### Fixed
-- Cycle orchestrator: a reflection that is not JSON, not an object, or has no recognised `decision` is now rejected with an error and the cycle stays at the same gate with the same Gate-ID. Previously it was treated as `continue` with confidence 1.0 and advanced the phase (KNOWN_ISSUES CYC-1). Clients that relied on sending prose instead of the JSON block must now send the block.
-- Task orchestrator: `complete_session` now refuses unless the session is on the validation phase with all validation requirements marked complete, unless `force: true` is passed (KNOWN_ISSUES STATE-2). Early completion no longer succeeds silently; forced completion is recorded on the session.
-- Cycle orchestrator: failed writes to `.m7/cycles/<taskId>.json` no longer report success — `commitState` uses `atomicWriteJSON` and returns `State not persisted: …` without advancing `completedPhases`; `safeReadJSON` tries backups when the main file JSON is corrupt (KNOWN_ISSUES STATE-1).
-- Server shutdown: graceful exit now awaits a flush of debounced memory (and journal) writes for up to 2 seconds before `process.exit`, so L2/L3 stores are not lost when the MCP client disconnects within the debounce window (KNOWN_ISSUES MEM-3).
+- MEM-1: `invalidate_bulk` / `UnifiedMemoryCore.invalidate()` persist STALE state to L2/L3; L0/L1 fail closed without RAM mutation (KNOWN_ISSUES MEM-1).
+- MEM-2: `convertToRecord` preserves stored `confidence` / `metadata.importance` of `0` on reload (KNOWN_ISSUES MEM-2).
+- MEM-4: `BoundedMap` capacity grows when loading large longterm/conceptual files; persist guard when in-memory count would truncate loaded data (KNOWN_ISSUES MEM-4).
+- CYC-7: Re-submitting a phase artifact appends with a timestamp separator; failed artifact write returns `Artifact not persisted` (KNOWN_ISSUES CYC-7).
+- CYC-9: `cleanupOldCycles` skips active cycles; archives old completed state under `.m7/cycles/archive/` (KNOWN_ISSUES CYC-9).
+- CYC-2: Per-task serialized submit; idempotent replay via `lastAccepted` sha256 (KNOWN_ISSUES CYC-2).
+- CYC-3: Terminal `completed` / `aborted` cycles reject further submits (KNOWN_ISSUES CYC-3).
+- CYC-4: Cycle I/O uses `projectPath` captured at `startCycle` (KNOWN_ISSUES CYC-4).
+- CYC-6: Carry-forward uses the latest reflection per phase after rewind (KNOWN_ISSUES CYC-6).
+
+### Changed
+- CYC-5: Separate `shortArtifactAttempts` and `rewindCount`; third consecutive short artifact returns phase-stuck instead of force-accepting (KNOWN_ISSUES CYC-5). **Breaking:** clients that relied on a third short submit to advance must submit a valid artifact or abort.
+
+## [Unreleased]
 
 ## [Unreleased — prior epistemic work]
 

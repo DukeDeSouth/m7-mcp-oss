@@ -1,6 +1,6 @@
 # M7 MCP
 
-**Current release:** [v3.18.1](https://github.com/DukeDeSouth/m7-mcp-oss/releases/tag/v3.18.1) — clone `main` or download the release archive. There is no npm package; build from source (`npm run build`).
+**Current release:** [v3.19.0](https://github.com/DukeDeSouth/m7-mcp-oss/releases/tag/v3.19.0) — clone `main` or download the release archive. There is no npm package; build from source (`npm run build`).
 
 An MCP server that makes an AI coding agent work through a fixed seven-phase
 cycle instead of jumping straight to code. It was built for Cursor, but it
@@ -69,7 +69,7 @@ For context, since harness-engineering frameworks became a popular topic in
   carry-forward context, template-driven artifacts.
 - July 2026: epistemic layer (fog of war boundaries, grounding gate, adversarial
   review gate, control-channel nonce, rule re-injection).
-- October 2026: first public community-fix batch on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) (v3.18.1) — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+- October 2026: public community-fix batches on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — v3.18.1 (batch 1), v3.19.0 (Stage 1 remainder + Stage 2 cycles); see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
 
 ## Requirements
 

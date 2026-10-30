@@ -8,6 +8,7 @@
 import { createLogger } from '../utils/logger.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { createHash } from 'node:crypto';
 import { getProjectPath } from '../utils/projectPath.js';
 import { atomicWriteJSON, safeReadJSON } from '../utils/atomicWrite.js';
 import { StatePersistError } from '../errors/statePersist.js';
@@ -19,7 +20,10 @@ import {
   CycleResponse,
   ReflectionGate,
   ReflectionDecision,
-  GateWeight
+  GateWeight,
+  CycleSubmitKind,
+  CycleStatus,
+  zeroPhaseCounters,
 } from './types/cycle.js';
 import {
   PHASE_CONFIGS,
@@ -60,43 +64,117 @@ type ParsedReflection =
   | { ok: false; reason: string };
 
 export class CycleOrchestrator {
+  private static readonly MAX_SHORT_ARTIFACT_ATTEMPTS = 3;
+  private static readonly MAX_REWINDS_PER_TARGET = 2;
+  private static readonly MIN_ARTIFACT_LENGTH = 100;
+
   private cycles: Map<string, CycleState> = new Map();
   private cyclesDir: string;
+  /** CYC-4: taskId → project root for cold getState */
+  private taskProjectRoots = new Map<string, string>();
+  /** CYC-2: serialize submit/reflection/rewind per task */
+  private taskQueues = new Map<string, Promise<unknown>>();
   
   constructor() {
     const projectPath = getProjectPath();
     this.cyclesDir = path.join(projectPath, '.m7', 'cycles');
   }
+
+  /** CYC-4 */
+  private cyclesDirForProject(projectPath: string): string {
+    return path.join(projectPath, '.m7', 'cycles');
+  }
+
+  private artifactsDirForState(state: CycleState): string {
+    return path.join(state.projectPath, CYCLES_DIR, state.taskSlug);
+  }
+
+  private cycleStatePathFor(projectPath: string, taskId: string): string {
+    return path.join(this.cyclesDirForProject(projectPath), `${taskId}.json`);
+  }
+
+  private projectRootFromStateFile(statePath: string): string {
+    return path.resolve(path.dirname(statePath), '..', '..');
+  }
   
   /**
-   * Remove cycle state files older than 7 days
+   * Remove cycle state files older than 7 days (CYC-9: skip active; archive completed)
    */
   private async cleanupOldCycles(): Promise<void> {
     try {
       await fs.mkdir(this.cyclesDir, { recursive: true });
+      const archiveDir = path.join(this.cyclesDir, 'archive');
+      await fs.mkdir(archiveDir, { recursive: true });
       const files = await fs.readdir(this.cyclesDir);
       const now = Date.now();
       const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
 
       for (const file of files) {
+        if (file === 'archive') continue;
         if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
+        if (file.endsWith('.jsonl')) continue; // handled with matching .json
+
         const filePath = path.join(this.cyclesDir, file);
         try {
           const stat = await fs.stat(filePath);
-          if (now - stat.mtimeMs > maxAge) {
-            await fs.unlink(filePath);
-            // v9.1: Also remove from in-memory Map to prevent unbounded growth
-            const cycleId = file.replace(/\.(json|jsonl)$/, '');
-            this.cycles.delete(cycleId);
-            log.debug(`Cleaned up old cycle file: ${file}`);
+          if (now - stat.mtimeMs <= maxAge) continue;
+
+          const raw = await fs.readFile(filePath, 'utf-8');
+          let state: CycleState;
+          try {
+            state = JSON.parse(raw) as CycleState;
+          } catch {
+            log.warn(`CYC-9: skipping cleanup of unreadable cycle state: ${file}`);
+            continue;
           }
+
+          if (this.isCycleStateActive(state)) {
+            log.debug(`CYC-9: keeping old active cycle state: ${file}`);
+            continue;
+          }
+
+          const dest = path.join(archiveDir, file);
+          await fs.rename(filePath, dest);
+          const cycleId = file.replace(/\.json$/, '');
+          this.cycles.delete(cycleId);
+          const logPath = path.join(this.cyclesDir, `${cycleId}_REFLECTION_LOG.jsonl`);
+          try {
+            await fs.access(logPath);
+            await fs.rename(logPath, path.join(archiveDir, `${cycleId}_REFLECTION_LOG.jsonl`));
+          } catch {
+            /* no reflection log */
+          }
+          log.info(`CYC-9: archived old cycle state: ${file}`);
         } catch {
-          // Skip files that can't be stat'd
+          // Skip files that can't be processed
         }
       }
     } catch {
       // Non-critical — silently ignore cleanup failures
     }
+  }
+
+  /** Active cycles must not be deleted by age-only cleanup (CYC-9). */
+  private isCycleStateActive(state: CycleState): boolean {
+    const status = (state as CycleState & { status?: string }).status;
+    if (status === 'active') return true;
+    if (status === 'completed' || status === 'aborted') return false;
+    return state.completedPhases.length < 7;
+  }
+
+  /** CYC-3: reject artifact/reflection submits after terminal lifecycle. */
+  private rejectIfTerminal(state: CycleState): CycleResponse | null {
+    const s = state.status;
+    if (s === 'completed' || s === 'aborted') {
+      return { success: false, error: `Cycle is ${s}` };
+    }
+    if (s === 'active') {
+      return null;
+    }
+    if (state.completedPhases.length >= 7) {
+      return { success: false, error: 'Cycle is completed' };
+    }
+    return null;
   }
 
   /**
@@ -107,11 +185,13 @@ export class CycleOrchestrator {
     await this.cleanupOldCycles();
     const taskId = this.generateTaskId(description);
     const taskSlug = this.generateSlug(description);
+    const ownerProject = getProjectPath();
     
     const state: CycleState = {
       taskId,
       taskSlug,
       taskDescription: description,
+      projectPath: ownerProject,
       currentPhase: 'intake',
       completedPhases: [],
       artifacts: {
@@ -125,28 +205,22 @@ export class CycleOrchestrator {
       },
       startedAt: new Date().toISOString(),
       lastUpdatedAt: new Date().toISOString(),
-      phaseAttempts: {
-        intake: 0,
-        discovery: 0,
-        architecture: 0,
-        solution: 0,
-        impact: 0,
-        simulation: 0,
-        implementation: 0
-      },
+      phaseAttempts: zeroPhaseCounters(),
+      shortArtifactAttempts: zeroPhaseCounters(),
+      rewindCount: zeroPhaseCounters(),
       // v2: Reflection Gates
       awaitingReflection: false,
       taskFraming: description,
       reflections: [],
       phaseMcpCallCount: 0,
       phaseEnteredAt: new Date().toISOString(),
+      status: 'active',
     };
     
     // Persist before exposing cycle in memory
     await this.commitState(state);
     
-    // Create artifacts directory
-    const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, taskSlug);
+    const artifactsDir = this.artifactsDirForState(state);
     await fs.mkdir(artifactsDir, { recursive: true });
     
     log.debug(`Started M7 Cycle: ${taskId}`);
@@ -155,7 +229,7 @@ export class CycleOrchestrator {
     const fin = await this.finalizeInstruction(committed, this.generateInstruction(committed));
     if ('success' in fin && fin.success === false) {
       throw new StatePersistError(
-        this.cycleStatePath(taskId),
+        this.cycleStatePathFor(ownerProject, taskId),
         fin.error ?? 'finalize instruction persist failed'
       );
     }
@@ -169,48 +243,91 @@ export class CycleOrchestrator {
     taskId: string,
     artifactContent: string
   ): Promise<CycleResponse> {
+    return this.enqueue(taskId, () =>
+      this.submitArtifactInner(taskId, artifactContent)
+    );
+  }
+
+  private async submitArtifactInner(
+    taskId: string,
+    artifactContent: string
+  ): Promise<CycleResponse> {
     const state = await this.getState(taskId);
     if (!state) {
       return { success: false, error: `Cycle ${taskId} not found` };
     }
+
+    const terminalArtifact = this.rejectIfTerminal(state);
+    if (terminalArtifact) {
+      return terminalArtifact;
+    }
+
+    const replay = this.tryIdempotentReplay(state, 'artifact', artifactContent);
+    if (replay) {
+      return replay;
+    }
+
+    if (state.awaitingReflection) {
+      return {
+        success: false,
+        error:
+          'Cycle is awaiting reflection. Submit the reflection JSON for the current gate, not another artifact.',
+      };
+    }
     
     // Validate artifact (basic length check)
-    const minLength = 100;
+    const minLength = CycleOrchestrator.MIN_ARTIFACT_LENGTH;
     if (!artifactContent || artifactContent.trim().length < minLength) {
       const attemptResult = await this.withCommittedState(taskId, draft => {
-        draft.phaseAttempts[draft.currentPhase]++;
+        draft.shortArtifactAttempts[draft.currentPhase]++;
       });
       if (this.isPersistFailure(attemptResult)) {
         return attemptResult;
       }
       const after = attemptResult.committed;
+      const n = after.shortArtifactAttempts[after.currentPhase];
 
-      if (after.phaseAttempts[after.currentPhase] >= 3) {
-        log.warn(`Loop detected in ${after.currentPhase} for ${taskId}, forcing transition`);
-      } else {
+      if (n >= CycleOrchestrator.MAX_SHORT_ARTIFACT_ATTEMPTS) {
         return {
           success: false,
-          error: `Artifact too short (${artifactContent.trim().length} chars). Minimum ${minLength} chars required. Attempt ${after.phaseAttempts[after.currentPhase]}/3.`
+          error:
+            `Phase stuck: ${n} short artifacts at ${after.currentPhase}. ` +
+            `Submit a valid artifact (≥${minLength} chars) or abort the cycle.`,
         };
       }
+      return {
+        success: false,
+        error:
+          `Artifact too short (${artifactContent.trim().length} chars). ` +
+          `Minimum ${minLength} chars required. Attempt ${n}/3.`,
+      };
     }
 
     const pre = state;
 
-    const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, pre.taskSlug);
+    const artifactsDir = this.artifactsDirForState(pre);
     const filename = this.getArtifactFilename(pre.currentPhase);
 
     try {
       await fs.mkdir(artifactsDir, { recursive: true });
-      const fileContent = this.ensureTemplateHeader(pre, artifactContent);
-      await fs.writeFile(path.join(artifactsDir, filename), fileContent, 'utf-8');
+      await this.writePhaseArtifactFile(
+        path.join(artifactsDir, filename),
+        pre,
+        artifactContent
+      );
       log.debug(`Saved artifact: ${filename}`);
     } catch (err) {
-      log.warn(`Failed to save artifact file: ${err}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn(`Failed to save artifact file: ${msg}`);
+      return {
+        success: false,
+        error: `Artifact not persisted: ${msg}`,
+      };
     }
 
     let spawnedIds: string[] | undefined;
     const commitResult = await this.withCommittedStateAsync(taskId, async draft => {
+      draft.shortArtifactAttempts[draft.currentPhase] = 0;
       draft.artifacts[draft.currentPhase] = artifactContent;
       if (!draft.completedPhases.includes(draft.currentPhase)) {
         draft.completedPhases.push(draft.currentPhase);
@@ -231,9 +348,10 @@ export class CycleOrchestrator {
       }
 
       if (isLastPhase(draft.currentPhase)) {
+        draft.status = 'completed';
         try {
           const { emitEpistemicMetricsForCycle } = await import('../../telemetry/epistemicMetrics.js');
-          const snapshot = await emitEpistemicMetricsForCycle(draft, getProjectPath());
+          const snapshot = await emitEpistemicMetricsForCycle(draft, draft.projectPath);
           draft.epistemicMetricsAtCompletion = {
             groundedRatio: snapshot.groundedRatio,
             frontierShrinkRate: snapshot.frontierShrinkRate,
@@ -280,11 +398,20 @@ export class CycleOrchestrator {
       if (!fin.success) {
         return fin;
       }
-      return {
+      const response: CycleResponse = {
         success: true,
         completed: true,
+        cycleStatus: 'completed',
         instruction: fin.instruction!,
       };
+      await this.saveIdempotentSnapshot(
+        taskId,
+        pre.currentPhase,
+        'artifact',
+        artifactContent,
+        response
+      );
+      return response;
     }
 
     log.debug(`Phase ${committed.currentPhase} complete, awaiting reflection gate`);
@@ -296,10 +423,18 @@ export class CycleOrchestrator {
     if (!fin.success) {
       return fin;
     }
-    return {
+    const response: CycleResponse = {
       success: true,
       instruction: fin.instruction!,
     };
+    await this.saveIdempotentSnapshot(
+      taskId,
+      pre.currentPhase,
+      'artifact',
+      artifactContent,
+      response
+    );
+    return response;
   }
   
   /**
@@ -309,9 +444,28 @@ export class CycleOrchestrator {
     taskId: string,
     reflectionContent: string
   ): Promise<CycleResponse> {
+    return this.enqueue(taskId, () =>
+      this.submitReflectionInner(taskId, reflectionContent)
+    );
+  }
+
+  private async submitReflectionInner(
+    taskId: string,
+    reflectionContent: string
+  ): Promise<CycleResponse> {
     const state = await this.getState(taskId);
     if (!state) {
       return { success: false, error: `Cycle ${taskId} not found` };
+    }
+
+    const terminalReflection = this.rejectIfTerminal(state);
+    if (terminalReflection) {
+      return terminalReflection;
+    }
+
+    const replay = this.tryIdempotentReplay(state, 'reflection', reflectionContent);
+    if (replay) {
+      return replay;
     }
     
     if (!state.awaitingReflection) {
@@ -369,7 +523,7 @@ export class CycleOrchestrator {
     const afterReflection = reflectionCommit.committed;
 
     await this.appendReflectionToArtifact(afterReflection, reflection);
-    await this.logReflection(taskId, reflection);
+    await this.logReflection(afterReflection, reflection);
     
     log.debug(`Reflection gate: ${reflection.decision} (phase: ${afterReflection.currentPhase}, confidence: ${reflection.confidence})`);
     
@@ -393,9 +547,22 @@ export class CycleOrchestrator {
       }
     }
 
+    const reflectionPhase = state.currentPhase;
+
     switch (reflection.decision) {
-      case 'continue':
-        return this.transitionToNextPhase(taskId);
+      case 'continue': {
+        const r = await this.transitionToNextPhase(taskId);
+        if (r.success) {
+          await this.saveIdempotentSnapshot(
+            taskId,
+            reflectionPhase,
+            'reflection',
+            reflectionContent,
+            r
+          );
+        }
+        return r;
+      }
       
       case 'pivot':
         if (reflection.taskFramingUpdate) {
@@ -407,29 +574,77 @@ export class CycleOrchestrator {
           }
           log.debug(`Task framing updated: ${reflection.taskFramingUpdate.substring(0, 80)}...`);
         }
-        return this.transitionToNextPhase(taskId);
+        {
+          const r = await this.transitionToNextPhase(taskId);
+          if (r.success) {
+            await this.saveIdempotentSnapshot(
+              taskId,
+              reflectionPhase,
+              'reflection',
+              reflectionContent,
+              r
+            );
+          }
+          return r;
+        }
       
       case 'rewind': {
         const target = reflection.rewindTarget || this.getPreviousPhase(afterReflection.currentPhase);
         if (!target) {
-          return this.transitionToNextPhase(taskId);
+          const r = await this.transitionToNextPhase(taskId);
+          if (r.success) {
+            await this.saveIdempotentSnapshot(
+              taskId,
+              reflectionPhase,
+              'reflection',
+              reflectionContent,
+              r
+            );
+          }
+          return r;
         }
-        return this.rewindToPhase(taskId, target);
+        const r = await this.rewindToPhase(taskId, target);
+        if (r.success) {
+          await this.saveIdempotentSnapshot(
+            taskId,
+            reflectionPhase,
+            'reflection',
+            reflectionContent,
+            r
+          );
+        }
+        return r;
       }
       
       case 'abort': {
+        const abortCommit = await this.withCommittedState(taskId, draft => {
+          draft.status = 'aborted';
+        });
+        if (this.isPersistFailure(abortCommit)) {
+          return abortCommit;
+        }
+        const afterAbort = abortCommit.committed;
         const fin = await this.finalizeIntoResponse(
-          afterReflection,
-          this.generateInstruction(afterReflection)
+          afterAbort,
+          this.generateInstruction(afterAbort)
         );
         if (!fin.success) {
           return fin;
         }
-        return {
+        const response: CycleResponse = {
           success: true,
           completed: true,
+          cycleStatus: 'aborted',
           instruction: fin.instruction!,
         };
+        await this.saveIdempotentSnapshot(
+          taskId,
+          reflectionPhase,
+          'reflection',
+          reflectionContent,
+          response
+        );
+        return response;
       }
       
       default: {
@@ -505,6 +720,7 @@ export class CycleOrchestrator {
       const nextPhase = getNextPhase(draft.currentPhase);
       if (!nextPhase) {
         cycleCompleted = true;
+        draft.status = 'completed';
         return;
       }
       draft.currentPhase = nextPhase;
@@ -524,6 +740,7 @@ export class CycleOrchestrator {
       return {
         success: true,
         completed: true,
+        cycleStatus: 'completed',
         instruction: fin.instruction!,
       };
     }
@@ -555,14 +772,14 @@ export class CycleOrchestrator {
       return this.transitionToNextPhase(taskId);
     }
 
-    const nextAttempts = (current.phaseAttempts[target] || 0) + 1;
-    if (nextAttempts > 2) {
+    const nextRewinds = (current.rewindCount[target] || 0) + 1;
+    if (nextRewinds > CycleOrchestrator.MAX_REWINDS_PER_TARGET) {
       log.warn(`Max rewinds reached for ${target}, forcing continue`);
       return this.transitionToNextPhase(taskId);
     }
 
     const result = await this.withCommittedState(taskId, draft => {
-      draft.phaseAttempts[target] = nextAttempts;
+      draft.rewindCount[target] = nextRewinds;
       draft.completedPhases = draft.completedPhases.filter(p => {
         return PHASE_CONFIGS[p].order < targetOrder;
       });
@@ -797,7 +1014,7 @@ mcp_m7_cycle task_id="${state.taskId}" artifact_content="<ваш reflection JSON
    * Append reflection section to the phase artifact file on disk
    */
   private async appendReflectionToArtifact(state: CycleState, reflection: ReflectionGate): Promise<void> {
-    const artifactsDir = path.join(getProjectPath(), CYCLES_DIR, state.taskSlug);
+    const artifactsDir = this.artifactsDirForState(state);
     const filename = this.getArtifactFilename(reflection.phase);
     const filePath = path.join(artifactsDir, filename);
     
@@ -826,12 +1043,12 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
   /**
    * Append reflection entry to REFLECTION_LOG.json (JSON lines format)
    */
-  private async logReflection(taskId: string, reflection: ReflectionGate): Promise<void> {
-    const logDir = path.join(getProjectPath(), '.m7', 'cycles');
-    const logPath = path.join(logDir, `${taskId}_REFLECTION_LOG.jsonl`);
+  private async logReflection(state: CycleState, reflection: ReflectionGate): Promise<void> {
+    const logDir = this.cyclesDirForProject(state.projectPath);
+    const logPath = path.join(logDir, `${state.taskId}_REFLECTION_LOG.jsonl`);
     
     const entry = JSON.stringify({
-      taskId,
+      taskId: state.taskId,
       ...reflection
     }) + '\n';
     
@@ -856,7 +1073,108 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
     if (!Array.isArray(state.reflections)) {
       state.reflections = [];
     }
+    if (!state.status) {
+      state.status =
+        state.completedPhases.length >= 7 ? 'completed' : ('active' as CycleStatus);
+    }
+    if (!state.phaseAttempts) {
+      state.phaseAttempts = zeroPhaseCounters();
+    }
+    if (!state.shortArtifactAttempts) {
+      state.shortArtifactAttempts = zeroPhaseCounters();
+    }
+    if (!state.rewindCount) {
+      state.rewindCount = zeroPhaseCounters();
+    }
+    if (!state.projectPath) {
+      state.projectPath = getProjectPath();
+    }
     return state;
+  }
+
+  private hashSubmitContent(content: string): string {
+    return createHash('sha256').update(content, 'utf8').digest('hex');
+  }
+
+  private tryIdempotentReplay(
+    state: CycleState,
+    kind: CycleSubmitKind,
+    content: string
+  ): CycleResponse | null {
+    const la = state.lastAccepted;
+    if (!la || !state.lastSuccessfulResponse) {
+      return null;
+    }
+    if (la.phase !== state.currentPhase || la.kind !== kind) {
+      return null;
+    }
+    if (la.sha256 !== this.hashSubmitContent(content)) {
+      return null;
+    }
+    if (kind === 'reflection' && !state.awaitingReflection) {
+      return null;
+    }
+    log.debug(`CYC-2: idempotent replay ${kind} for phase ${state.currentPhase}`);
+    return structuredClone(state.lastSuccessfulResponse);
+  }
+
+  private enqueue<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.taskQueues.get(taskId) ?? Promise.resolve();
+    const tail = previous.then(
+      () => fn(),
+      () => fn()
+    );
+    this.taskQueues.set(taskId, tail);
+    void tail.finally(() => {
+      if (this.taskQueues.get(taskId) === tail) {
+        this.taskQueues.delete(taskId);
+      }
+    });
+    return tail;
+  }
+
+  private async saveIdempotentSnapshot(
+    taskId: string,
+    phase: PhaseType,
+    kind: CycleSubmitKind,
+    content: string,
+    response: CycleResponse
+  ): Promise<void> {
+    const sha256 = this.hashSubmitContent(content);
+    const snap = structuredClone(response);
+    const result = await this.withCommittedState(taskId, draft => {
+      draft.lastAccepted = { phase, kind, sha256 };
+      draft.lastSuccessfulResponse = snap;
+    });
+    if (this.isPersistFailure(result)) {
+      log.warn(`CYC-2: failed to persist idempotent snapshot for ${taskId}`);
+    }
+  }
+
+  /**
+   * CYC-7: first write uses template header; resubmits append with timestamp separator.
+   */
+  private async writePhaseArtifactFile(
+    filePath: string,
+    state: CycleState,
+    artifactContent: string
+  ): Promise<void> {
+    let exists = false;
+    try {
+      await fs.access(filePath);
+      exists = true;
+    } catch {
+      exists = false;
+    }
+
+    if (!exists) {
+      const fileContent = this.ensureTemplateHeader(state, artifactContent);
+      await fs.writeFile(filePath, fileContent, 'utf-8');
+      return;
+    }
+
+    const separator = `\n\n---\n<!-- resubmitted ${new Date().toISOString()} -->\n\n`;
+    await fs.appendFile(filePath, separator + artifactContent, 'utf-8');
   }
 
   /**
@@ -885,6 +1203,21 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
   }
 
   /**
+   * CYC-6: Most recent gate decision for a phase (after rewind/redo, last push wins).
+   */
+  private latestReflectionForPhase(
+    reflections: ReflectionGate[],
+    phase: PhaseType
+  ): ReflectionGate | undefined {
+    for (let i = reflections.length - 1; i >= 0; i--) {
+      if (reflections[i].phase === phase) {
+        return reflections[i];
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Build carry-forward context from completed phases and their reflections.
    * Gives AI context about what happened so far, even in a new chat session.
    */
@@ -894,7 +1227,7 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
     const artifactsDir = `${CYCLES_DIR}/${state.taskSlug}`;
     const rows: string[] = [];
     for (const phase of state.completedPhases) {
-      const reflection = state.reflections.find(r => r.phase === phase);
+      const reflection = this.latestReflectionForPhase(state.reflections, phase);
       const decision = reflection?.decision?.toUpperCase() || '-';
       const summary = reflection?.summary 
         || this.extractBriefSummary(state.artifacts[phase])?.replace(/^> /gm, '').substring(0, 120)
@@ -992,13 +1325,15 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
   }
 
   private async commitState(next: CycleState): Promise<void> {
-    await fs.mkdir(this.cyclesDir, { recursive: true });
-    const statePath = this.cycleStatePath(next.taskId);
+    const cyclesDir = this.cyclesDirForProject(next.projectPath);
+    await fs.mkdir(cyclesDir, { recursive: true });
+    const statePath = this.cycleStatePathFor(next.projectPath, next.taskId);
     const result = await atomicWriteJSON(statePath, next);
     if (!result.success) {
       throw new StatePersistError(statePath, result.error ?? 'unknown error');
     }
     this.cycles.set(next.taskId, next);
+    this.taskProjectRoots.set(next.taskId, next.projectPath);
   }
 
   private async withCommittedState(
@@ -1145,17 +1480,36 @@ ${progressBar}`.trim();
       return this.migrateState(this.cycles.get(taskId)!);
     }
 
-    const statePath = this.cycleStatePath(taskId);
-    const { data, recoveredFrom } = await safeReadJSON<CycleState>(statePath);
-    if (!data) {
-      return null;
+    const candidatePaths: string[] = [];
+    const mappedRoot = this.taskProjectRoots.get(taskId);
+    if (mappedRoot) {
+      candidatePaths.push(this.cycleStatePathFor(mappedRoot, taskId));
     }
-    if (recoveredFrom) {
-      log.info(`Cycle state recovered from ${recoveredFrom}`);
+    candidatePaths.push(this.cycleStatePath(taskId));
+    candidatePaths.push(this.cycleStatePathFor(getProjectPath(), taskId));
+
+    const seen = new Set<string>();
+    for (const statePath of candidatePaths) {
+      if (seen.has(statePath)) continue;
+      seen.add(statePath);
+
+      const { data, recoveredFrom } = await safeReadJSON<CycleState>(statePath);
+      if (!data) {
+        continue;
+      }
+      if (recoveredFrom) {
+        log.info(`Cycle state recovered from ${recoveredFrom}`);
+      }
+      if (!data.projectPath) {
+        data.projectPath = this.projectRootFromStateFile(statePath);
+      }
+      const state = this.migrateState(data);
+      this.cycles.set(taskId, state);
+      this.taskProjectRoots.set(taskId, state.projectPath);
+      return state;
     }
-    const state = this.migrateState(data);
-    this.cycles.set(taskId, state);
-    return state;
+
+    return null;
   }
 
   /**
@@ -1167,8 +1521,7 @@ ${progressBar}`.trim();
       return { success: false, error: `Cycle ${taskId} not found` };
     }
     
-    const projectPath = getProjectPath();
-    const registryPath = path.join(projectPath, 'CYCLE_REGISTRY.md');
+    const registryPath = path.join(state.projectPath, 'CYCLE_REGISTRY.md');
     
     const type = state.taskSlug.startsWith('feat') ? 'feat' : 'cycle';
     const folder = `${CYCLES_DIR}/${state.taskSlug}`;

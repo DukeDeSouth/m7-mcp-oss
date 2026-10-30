@@ -1,6 +1,6 @@
 {
   "name": "@m7/mcp-server",
-  "version": "3.18.1",
+  "version": "3.19.0",
   "description": "M7 MCP Server - methodology-enforcing MCP server for AI coding agents: 7-phase cycle with reflection gates, persistent memory, fog of war, Hive multi-agent",
   "type": "module",
   "main": "dist/index.js",
