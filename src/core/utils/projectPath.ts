@@ -88,7 +88,12 @@ function decodeCursorProjectSlug(slug: string): string | null {
   if (!trimmed) return null;
 
   const home = resolve(homedir());
-  const homeSlug = home.replace(/^\//, '').replace(/\//g, '-');
+  // Cross-platform slug base: strip a leading POSIX root or a Windows drive
+  // root ("C:\"), then turn every remaining separator into '-'.
+  // POSIX-only replace(/\//g, '-') leaves backslashes intact on win32.
+  const homeSlug = home
+    .replace(/^(?:[A-Za-z]:)?[\\/]/, '')
+    .replace(/[\\/]/g, '-');
 
   if (trimmed === homeSlug) {
     return isUnsafeFallbackPath(home) ? null : home;
