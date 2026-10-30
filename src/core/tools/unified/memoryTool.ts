@@ -826,16 +826,29 @@ export const unifiedMemoryTool = {
         case 'invalidate_bulk': {
           const invIds = params.ids;
           if (!invIds?.length) throw new Error('ids array required for invalidate_bulk');
-          let invTotal = 0;
+          let persisted = 0;
+          const notFound: string[] = [];
+          const failed: { id: string; error: string }[] = [];
           for (const invId of invIds) {
-            const invRecord = await memory.get(invId);
-            if (invRecord) {
-              invRecord.confidence *= 0.3;
-              invRecord.invalidatedAt = new Date();
-              invTotal++;
+            const result = await memory.invalidate(invId, 0.3);
+            if (result.ok) {
+              persisted++;
+            } else if (result.reason === 'not_found') {
+              notFound.push(invId);
+            } else {
+              failed.push({ id: invId, error: result.error });
             }
           }
-          response += `**Invalidated:** ${invTotal}/${invIds.length} records\n`;
+          response += `**Invalidated:** ${persisted}/${invIds.length}\n`;
+          if (notFound.length > 0) {
+            response += `**Not found:** ${notFound.join(', ')}\n`;
+          }
+          if (failed.length > 0) {
+            response += `**Failed persist:**\n`;
+            for (const f of failed) {
+              response += `- ${f.id}: ${f.error}\n`;
+            }
+          }
           break;
         }
 

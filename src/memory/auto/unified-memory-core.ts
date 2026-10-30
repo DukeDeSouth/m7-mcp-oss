@@ -284,6 +284,14 @@ function generateId(): string {
   return `mem_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+/** Levels that flush to `.m7/memory/*.json` (MEM-1) */
+const DURABLE_MEMORY_STORAGE = new Set(['longterm', 'conceptual']);
+
+export type InvalidateResult =
+  | { ok: true; record: MemoryRecord }
+  | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'persist_failed'; error: string };
+
 // ============================================================================
 // Unified Memory Core Class
 // ============================================================================
@@ -408,28 +416,53 @@ export class UnifiedMemoryCore {
     return recordStore.get(id) ?? null;
   }
 
+  private buildPersistPayload(record: MemoryRecord): Record<string, unknown> {
+    return {
+      content: record.content,
+      level: record.level,
+      source: record.source,
+      contextKeys: record.contextKeys,
+      confidence: record.confidence,
+      accessCount: record.accessCount,
+      dependencies: record.dependencies,
+      dependents: record.dependents,
+      dependencyRelations: record.dependencyRelations,
+      contentHash: record.contentHash,
+      lastValidated: record.lastValidated,
+      needsConsolidation: record.needsConsolidation,
+      consolidatedFrom: record.consolidatedFrom,
+      promotedFrom: record.promotedFrom,
+      timestamp: record.createdAt.toISOString(),
+      ...(record.invalidatedAt
+        ? { invalidatedAt: record.invalidatedAt.toISOString() }
+        : {}),
+    };
+  }
+
   private async persistRecord(record: MemoryRecord): Promise<void> {
     const storageLevel = this.mapLevelToStorage(record.level);
     try {
-      await this.memorySystem.store(record.id, {
-        content: record.content,
-        level: record.level,
-        source: record.source,
-        contextKeys: record.contextKeys,
-        confidence: record.confidence,
-        accessCount: record.accessCount,
-        dependencies: record.dependencies,
-        dependents: record.dependents,
-        dependencyRelations: record.dependencyRelations,
-        contentHash: record.contentHash,
-        lastValidated: record.lastValidated,
-        needsConsolidation: record.needsConsolidation,
-        consolidatedFrom: record.consolidatedFrom,
-        promotedFrom: record.promotedFrom,
-        timestamp: record.createdAt.toISOString(),
-      }, storageLevel);
+      await this.memorySystem.store(
+        record.id,
+        this.buildPersistPayload(record),
+        storageLevel
+      );
     } catch (err) {
       log.debug('MemorySystem store fallback:', err);
+    }
+  }
+
+  private async persistRecordStrict(record: MemoryRecord): Promise<void> {
+    const storageLevel = this.mapLevelToStorage(record.level);
+    try {
+      await this.memorySystem.store(
+        record.id,
+        this.buildPersistPayload(record),
+        storageLevel
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Memory persist failed: ${msg}`);
     }
   }
   
@@ -757,6 +790,50 @@ export class UnifiedMemoryCore {
     }
     
     return null;
+  }
+
+  /**
+   * Mark a record invalidated and persist to durable storage (L2/L3). MEM-1.
+   */
+  async invalidate(id: string, factor = 0.3): Promise<InvalidateResult> {
+    await this.initialize();
+    if (deletedIds.has(id)) {
+      return { ok: false, reason: 'not_found' };
+    }
+
+    const existing = await this.get(id);
+    if (!existing) {
+      return { ok: false, reason: 'not_found' };
+    }
+
+    const storageLevel = this.mapLevelToStorage(existing.level);
+    if (!DURABLE_MEMORY_STORAGE.has(storageLevel)) {
+      return {
+        ok: false,
+        reason: 'persist_failed',
+        error: 'Record level is not durably persisted (use L2/L3)',
+      };
+    }
+
+    const snapshot = structuredClone(existing);
+    const next = structuredClone(existing);
+    next.confidence *= factor;
+    next.invalidatedAt = new Date();
+    recordStore.set(id, next);
+
+    try {
+      await this.persistRecordStrict(next);
+      return { ok: true, record: next };
+    } catch (e) {
+      recordStore.set(id, snapshot);
+      try {
+        await this.persistRecord(snapshot);
+      } catch {
+        /* best-effort resync MemorySystem + pendingWrites */
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, reason: 'persist_failed', error: msg };
+    }
   }
 
   /**
@@ -1239,15 +1316,21 @@ export class UnifiedMemoryCore {
 
   private convertToRecord(item: any): MemoryRecord {
     const data = item.data || item;
+    let invalidatedAt: Date | undefined;
+    if (data.invalidatedAt) {
+      const d = new Date(data.invalidatedAt);
+      invalidatedAt = Number.isNaN(d.getTime()) ? undefined : d;
+    }
     return {
       id: item._key || item.key || item.id || generateId(),
       content: data.content || JSON.stringify(data),
       level: this.mapStorageToLevel(item.level || data.level || 'surface'),
       source: (data.source || 'runtime') as SourceType,
       contextKeys: data.contextKeys || [],
-      confidence: data.confidence || 0.5,
-      accessCount: data.accessCount || 0,
+      confidence: data.confidence ?? 0.5,
+      accessCount: data.accessCount ?? 0,
       createdAt: data.timestamp ? new Date(data.timestamp) : new Date(),
+      invalidatedAt,
       needsConsolidation: data.needsConsolidation === true,
       consolidatedFrom: data.consolidatedFrom,
       promotedFrom: data.promotedFrom,
@@ -1260,7 +1343,7 @@ export class UnifiedMemoryCore {
         type: data.source || 'runtime',
         source: data.contextKeys?.[0] || '',
         tags: data.contextKeys || [],
-        importance: data.confidence || 0.5,
+        importance: data.confidence ?? 0.5,
       },
     };
   }

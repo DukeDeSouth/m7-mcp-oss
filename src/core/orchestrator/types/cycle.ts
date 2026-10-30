@@ -16,6 +16,16 @@ export type PhaseType =
 
 export type ReflectionDecision = 'continue' | 'pivot' | 'rewind' | 'abort';
 
+export type CycleSubmitKind = 'artifact' | 'reflection';
+
+export type CycleStatus = 'active' | 'completed' | 'aborted';
+
+export interface LastAcceptedSubmit {
+  phase: PhaseType;
+  kind: CycleSubmitKind;
+  sha256: string;
+}
+
 export type GateWeight = 'heavy' | 'standard' | 'light';
 
 export interface ReflectionGate {
@@ -39,6 +49,19 @@ export interface PhaseConfig {
   definitionOfDone: string[];
 }
 
+/** CYC-5: zeroed per-phase counter map for cycle state init/migrate. */
+export function zeroPhaseCounters(): Record<PhaseType, number> {
+  return {
+    intake: 0,
+    discovery: 0,
+    architecture: 0,
+    solution: 0,
+    impact: 0,
+    simulation: 0,
+    implementation: 0,
+  };
+}
+
 export interface CycleState {
   taskId: string;
   taskSlug: string;
@@ -48,7 +71,12 @@ export interface CycleState {
   artifacts: Record<PhaseType, string | null>;
   startedAt: string;  // ISO date
   lastUpdatedAt: string;
-  phaseAttempts: Record<PhaseType, number>;  // For loop prevention
+  /** @deprecated CYC-5 — no longer updated; kept for legacy JSON. */
+  phaseAttempts: Record<PhaseType, number>;
+  /** CYC-5: consecutive short artifact rejects per phase (reset on successful artifact). */
+  shortArtifactAttempts: Record<PhaseType, number>;
+  /** CYC-5: rewinds targeting this phase. */
+  rewindCount: Record<PhaseType, number>;
   // v2: Reflection Gates
   awaitingReflection: boolean;
   taskFraming: string;
@@ -87,6 +115,13 @@ export interface CycleState {
   phaseMcpCallCount?: number;
   phaseEnteredAt?: string;
   lastRuleReinjectionAt?: string;
+  /** CYC-2: idempotent replay of last successful submit (same phase, kind, content hash) */
+  lastAccepted?: LastAcceptedSubmit;
+  lastSuccessfulResponse?: CycleResponse;
+  /** CYC-2 / CYC-3: cycle lifecycle (transitions in CYC-3) */
+  status?: CycleStatus;
+  /** CYC-4: project root captured at startCycle; all cycle I/O uses this path. */
+  projectPath: string;
 }
 
 export interface CycleInstruction {
@@ -128,4 +163,6 @@ export interface CycleResponse {
   instruction?: CycleInstruction;
   error?: string;
   completed?: boolean;
+  /** CYC-3: persisted terminal status when completed === true */
+  cycleStatus?: CycleStatus;
 }

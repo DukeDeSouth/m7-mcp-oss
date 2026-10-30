@@ -351,6 +351,8 @@ describe('Reflection Gates', () => {
     
     assert.ok(result.success);
     assert.ok(result.completed, 'Abort should mark cycle as completed');
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.status, 'aborted');
   });
 
   it('rewind max 2 times then forces continue', async () => {
@@ -589,18 +591,20 @@ describe('Full Cycle Flow', () => {
     assert.ok(result.error.includes('too short') || result.error.includes('Minimum'));
   });
 
-  it('artifact too short — 3 attempts then force transition', async () => {
+  it('artifact too short — third attempt returns phase stuck (CYC-5)', async () => {
     const orch = new CycleOrchestrator();
-    const start = await orch.startCycle('Test artifact force transition');
-    
-    // 3 short submissions — should force past the phase
+    const start = await orch.startCycle('Test artifact stuck on third short');
+
     await orch.submitArtifact(start.taskId, 'short 1');
     await orch.submitArtifact(start.taskId, 'short 2');
     const result = await orch.submitArtifact(start.taskId, 'short 3');
-    
-    // 3rd attempt should force through (loop prevention)
-    assert.ok(result.success || result.instruction,
-      'After 3 failed attempts, should force transition');
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? '', /Phase stuck/i);
+    assert.match(result.error ?? '', /3 short artifacts/i);
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.shortArtifactAttempts.intake, 3);
+    assert.equal(st.awaitingReflection, false);
   });
 
   it('nonexistent task ID returns error', async () => {
@@ -1178,3 +1182,271 @@ after(async () => {
     // Best-effort cleanup — do not fail the run
   });
 }, { timeout: 20000 });
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-4: pinned projectPath on CycleState
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-4 pinned projectPath', () => {
+  it('artifact and state stay under project captured at startCycle when path switches', async () => {
+    const { mkdtemp } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const {
+      applyProjectPath,
+      resetProjectPathStateForTests,
+    } = await import('../dist/core/utils/projectPath.js');
+
+    resetProjectPathStateForTests();
+    const dirA = await mkdtemp(path.join(tmpdir(), 'cyc4-a-'));
+    const dirB = await mkdtemp(path.join(tmpdir(), 'cyc4-b-'));
+
+    try {
+      applyProjectPath(dirA);
+      const orch = new CycleOrchestrator();
+      const start = await orch.startCycle('CYC-4 project pin test');
+
+      applyProjectPath(dirB);
+      const submit = await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+      assert.equal(submit.success, true);
+
+      const stateFile = path.join(dirA, '.m7', 'cycles', `${start.taskId}.json`);
+      await fs.access(stateFile);
+
+      const st = await orch.getState(start.taskId);
+      assert.equal(st.projectPath, dirA);
+
+      const artFile = path.join(dirA, 'm7-cycles', st.taskSlug, 'INTAKE.md');
+      await fs.access(artFile);
+
+      const stateUnderB = path.join(dirB, '.m7', 'cycles', `${start.taskId}.json`);
+      await assert.rejects(() => fs.access(stateUnderB), /ENOENT|not found/i);
+    } finally {
+      resetProjectPathStateForTests();
+      process.env.M7_PROJECT_PATH = path.join(import.meta.dirname, '..');
+      await fs.rm(dirA, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(dirB, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-5: separate short-artifact and rewind attempt counters
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-5 separate attempt counters', () => {
+  it('valid artifact after two shorts resets counter and advances', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-5 reset after valid');
+    await orch.submitArtifact(start.taskId, 'short 1');
+    await orch.submitArtifact(start.taskId, 'short 2');
+    const ok = await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    assert.equal(ok.success, true);
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.shortArtifactAttempts.intake, 0);
+    assert.equal(st.awaitingReflection, true);
+  });
+
+  it('two rewinds to discovery then one short → attempt 1/3 not stuck', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-5 rewind short isolation');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'OK');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('discovery'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'OK');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('architecture'));
+    await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
+      makeReflectionWithRewind('discovery', 'redo discovery 1', gateId)
+    );
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('discovery'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'OK');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('architecture'));
+    await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
+      makeReflectionWithRewind('discovery', 'redo discovery 2', gateId)
+    );
+
+    const stBefore = await orch.getState(start.taskId);
+    assert.equal(stBefore.rewindCount.discovery, 2);
+    assert.equal(stBefore.currentPhase, 'discovery');
+    assert.equal(stBefore.awaitingReflection, false);
+
+    const short = await orch.submitArtifact(start.taskId, 'tiny');
+    assert.equal(short.success, false);
+    assert.match(short.error ?? '', /Attempt 1\/3/);
+    assert.doesNotMatch(short.error ?? '', /Phase stuck/i);
+
+    const stAfter = await orch.getState(start.taskId);
+    assert.equal(stAfter.shortArtifactAttempts.discovery, 1);
+    assert.equal(stAfter.rewindCount.discovery, 2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-6: carry-forward uses latest reflection per phase
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-6 carry-forward latest reflection', () => {
+  it('rewind redo discovery shows second summary in Previous Phases', async () => {
+    const orch = new CycleOrchestrator();
+    const OLD = 'CYC6_OLD_' + Date.now();
+    const NEW = 'CYC6_NEW_' + Date.now();
+    const start = await orch.startCycle('CYC-6 carry forward latest');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'intake ok');
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('discovery'));
+    await reflectAfterGate(orch, start.taskId, 'continue', OLD);
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('architecture'));
+    await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
+      makeReflectionWithRewind('discovery', 'redo discovery', gateId)
+    );
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('discovery'));
+    const after = await reflectAfterGate(orch, start.taskId, 'continue', NEW);
+
+    const text = after.instruction.instruction;
+    assert.ok(text.includes('Previous Phases'));
+    assert.ok(text.includes(NEW), 'carry-forward must show latest discovery summary');
+    assert.ok(!text.includes(OLD), 'carry-forward must not show pre-rewind discovery summary');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-2: serialized + idempotent submit
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-2 serialized submit', () => {
+  it('concurrent identical artifact → one intake completion', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-2 concurrent identical artifact');
+    const art = fakeArtifact('intake');
+    const [a, b] = await Promise.all([
+      orch.submitArtifact(start.taskId, art),
+      orch.submitArtifact(start.taskId, art),
+    ]);
+    assert.equal(a.success, true);
+    assert.equal(b.success, true);
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.completedPhases.filter((p) => p === 'intake').length, 1);
+    assert.equal(st.awaitingReflection, true);
+  });
+
+  it('sequential duplicate artifact replays response without extra completion', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-2 sequential duplicate artifact');
+    const art = fakeArtifact('intake');
+    const r1 = await orch.submitArtifact(start.taskId, art);
+    assert.equal(r1.success, true);
+    const r2 = await orch.submitArtifact(start.taskId, art);
+    assert.deepEqual(r2, r1);
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.completedPhases.filter((p) => p === 'intake').length, 1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-3: terminal cycle status
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-3 terminal status', () => {
+  it('abort at intake → status aborted; further submit rejected', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-3 abort terminal');
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    const abortReflection = await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
+      `\`\`\`json\n${JSON.stringify({
+        gate_instruction_id: gateId,
+        decision: 'abort',
+        change_detected: true,
+        summary: 'Stop early',
+        confidence: 0.85,
+      })}\n\`\`\``
+    );
+    assert.ok(abortReflection.success);
+    const st = await orch.getState(start.taskId);
+    assert.equal(st.status, 'aborted');
+
+    const again = await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    assert.equal(again.success, false);
+    assert.match(again.error ?? '', /aborted/i);
+  });
+
+  it('formatCompletionResponse for abort omits all-7-phases wording', async () => {
+    const { formatCompletionResponse } = await import('../dist/core/tools/cycleTool.js');
+    const text = formatCompletionResponse('cycle_test', 'aborted', 'intake', 1);
+    assert.doesNotMatch(text, /All 7 phases done/i);
+    assert.match(text, /ABORTED/i);
+    assert.match(text, /intake/i);
+  });
+
+  it('after abort duplicate reflection is rejected not replayed', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-3 abort idempotent guard');
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    let savedContent = '';
+    const first = await reflectAfterGateRaw(orch, start.taskId, (gateId) => {
+      savedContent = `\`\`\`json\n${JSON.stringify({
+        gate_instruction_id: gateId,
+        decision: 'abort',
+        change_detected: false,
+        summary: 'Nope',
+        confidence: 0.8,
+      })}\n\`\`\``;
+      return savedContent;
+    });
+    assert.ok(first.success);
+    const retry = await orch.submitReflection(start.taskId, savedContent);
+    assert.equal(retry.success, false);
+    assert.match(retry.error ?? '', /aborted/i);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// CYC-7: artifact resubmit preserves prior text on disk
+// ═══════════════════════════════════════════════════════════════
+
+describe('CYC-7 artifact resubmit trace', () => {
+  it('rewind resubmit appends both discovery versions', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-7 resubmit trace test');
+    const markerA = 'DISCOVERY_VERSION_ALPHA_' + Date.now();
+    const markerB = 'DISCOVERY_VERSION_BETA_' + Date.now();
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'OK');
+
+    await orch.submitArtifact(
+      start.taskId,
+      `# DISCOVERY: CYC-7\n\n${markerA}\n\n${'a'.repeat(120)}`
+    );
+    await reflectAfterGateRaw(orch, start.taskId, (gateId) =>
+      makeReflectionWithRewind('intake', 'redo discovery', gateId)
+    );
+
+    await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
+    await reflectAfterGate(orch, start.taskId, 'continue', 'OK');
+
+    await orch.submitArtifact(
+      start.taskId,
+      `# DISCOVERY: CYC-7\n\n${markerB}\n\n${'b'.repeat(120)}`
+    );
+
+    const projectPath = process.env.M7_PROJECT_PATH || path.join(import.meta.dirname, '..');
+    const stateRaw = await fs.readFile(
+      path.join(projectPath, '.m7', 'cycles', `${start.taskId}.json`),
+      'utf8'
+    );
+    const state = JSON.parse(stateRaw);
+    const filePath = path.join(projectPath, 'm7-cycles', state.taskSlug, 'DISCOVERY.md');
+    const raw = await fs.readFile(filePath, 'utf8');
+    assert.ok(raw.includes(markerA), 'first discovery version must remain');
+    assert.ok(raw.includes('resubmitted'), 'separator expected on resubmit');
+    assert.ok(raw.includes(markerB), 'second discovery version must be present');
+  });
+});

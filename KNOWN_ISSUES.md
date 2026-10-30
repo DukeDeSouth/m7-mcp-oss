@@ -25,21 +25,21 @@ Items marked `good first issue` are self-contained and need no knowledge of the 
 | ID | Title | Severity | Stage | Labels | Status |
 |---|---|---|---|---|---|
 | CYC-1 | Unparseable reflection is treated as `continue` with confidence 1.0 | high | 1 | bug, help wanted | fixed in #5 |
-| CYC-2 | Artifact submission is neither idempotent nor serialized | medium | 2 | bug, help wanted | open |
-| CYC-3 | A finished or aborted cycle is not terminal | medium | 2 | bug | open |
-| CYC-4 | Cycle state and artifact files can land in different projects | medium | 2 | bug | open |
-| CYC-5 | One attempt counter serves two unrelated limits | medium | 2 | bug | open |
-| CYC-6 | Carry-forward picks the first reflection, not the latest | medium | 2 | bug, good first issue | open |
-| CYC-7 | Re-submitting an artifact overwrites the previous file without trace | medium | 1 | bug, good first issue | open |
+| CYC-2 | Artifact submission is neither idempotent nor serialized | medium | 2 | bug, help wanted | fixed in #6 |
+| CYC-3 | A finished or aborted cycle is not terminal | medium | 2 | bug | fixed in #6 |
+| CYC-4 | Cycle state and artifact files can land in different projects | medium | 2 | bug | fixed in #6 |
+| CYC-5 | One attempt counter serves two unrelated limits | medium | 2 | bug | fixed in #6 |
+| CYC-6 | Carry-forward picks the first reflection, not the latest | medium | 2 | bug, good first issue | fixed in #6 |
+| CYC-7 | Re-submitting an artifact overwrites the previous file without trace | medium | 1 | bug, good first issue | fixed in #6 |
 | CYC-8 | Registry append never deduplicates | low | 3 | bug, good first issue | open |
-| CYC-9 | Cleanup deletes cycle state by age alone | high | 1 | bug | open |
+| CYC-9 | Cleanup deletes cycle state by age alone | high | 1 | bug | fixed in #6 |
 | STATE-1 | Failed state write is reported as success; backups are never consulted for corrupt files | high | 1 | bug, help wanted | fixed in #5 |
 | STATE-2 | `complete_session` has no phase guard | high | 1 | bug | fixed in #5 |
 | MEM-0 | Tracking: one read path for memory | medium | 2 | bug, help wanted | open |
-| MEM-1 | `invalidate_bulk` mutates in memory only | high | 1 | bug, good first issue | open |
-| MEM-2 | Confidence `0` becomes `0.5` on load | high | 1 | bug, good first issue | open |
+| MEM-1 | `invalidate_bulk` mutates in memory only | high | 1 | bug, good first issue | fixed in #6 |
+| MEM-2 | Confidence `0` becomes `0.5` on load | high | 1 | bug, good first issue | fixed in #6 |
 | MEM-3 | Pending memory writes are dropped on shutdown | high | 1 | bug | fixed in #5 |
-| MEM-4 | Loading more than 2000 long-term records evicts and then rewrites the file | high | 1 | bug | open |
+| MEM-4 | Loading more than 2000 long-term records evicts and then rewrites the file | high | 1 | bug | fixed in #6 |
 | GRAPH-1 | Depth-limited DFS marks nodes visited at the wrong depth | medium | 2 | bug, good first issue | open |
 | GRAPH-2 | Transfer task IDs can collide and overwrite | low | 2 | bug, good first issue | open |
 | GRAPH-3 | Failed transfer leaves an orphan task | medium | 2 | bug | open |
@@ -85,11 +85,9 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-1 — Unparseable reflection is treated as `continue` with confidence 1.0
 
-**Severity:** high · **Stage:** 1 · **Labels:** bug, help wanted · **Status:** open
+**Severity:** high · **Stage:** 1 · **Labels:** bug, help wanted · **Status:** fixed in #5
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — `parseReflection()` L634-665 (`defaultReflection`, `catch` branch), `validateDecision()` L672-675; test `tests/cycleOrchestrator.test.mjs` L389-401.
-
-**What happens:** If the reflection content has a valid gate ID but the JSON inside cannot be parsed, the orchestrator substitutes `{ decision: 'continue', confidence: 1.0 }` and advances to the next phase. An unknown `decision` string (anything other than continue/pivot/rewind/abort) is also mapped to `continue`. The existing test `invalid JSON in reflection → auto-continue` asserts this behavior, so it is currently the specified policy, not an accident.
 
 **Reproduce:** Start a cycle, submit any artifact, then submit `## Gate-ID: <id>\n\nnot json` as the reflection. The response shows the next phase.
 
@@ -101,7 +99,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-2 — Artifact submission is neither idempotent nor serialized
 
-**Severity:** medium · **Stage:** 2 · **Labels:** bug, help wanted · **Status:** open
+**Severity:** medium · **Stage:** 2 · **Labels:** bug, help wanted · **Status:** fixed in #6
 
 **Where:** `src/core/tools/cycleTool.ts` L87-100 (branch between `submitReflection` and `submitArtifact` based on current state); `src/core/orchestrator/cycleOrchestrator.ts` — `submitArtifact()` L154-183 (no lock, no content hash).
 
@@ -117,7 +115,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-3 — A finished or aborted cycle is not terminal
 
-**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** open
+**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — completion paths at L236-242, L363-370 (`abort`), L429-436; `src/core/tools/cycleTool.ts` — `formatCompletionResponse()` L210 (static string).
 
@@ -133,7 +131,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-4 — Cycle state and artifact files can land in different projects
 
-**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** open
+**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — constructor L59-61 captures `cyclesDir` from `getProjectPath()` once; `submitArtifact()` L186 calls `getProjectPath()` again when writing the artifact file.
 
@@ -147,7 +145,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-5 — One attempt counter serves two unrelated limits
 
-**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** open
+**Severity:** medium · **Stage:** 2 · **Labels:** bug · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — `phaseAttempts` incremented for short artifacts at L166 and checked with `>= 3` at L170 (third short artifact is force-accepted); the same map incremented by `rewindToPhase()` at L466 and checked with `> 2` at L467.
 
@@ -161,7 +159,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-6 — Carry-forward picks the first reflection, not the latest
 
-**Severity:** medium · **Stage:** 2 · **Labels:** bug, good first issue · **Status:** open
+**Severity:** medium · **Stage:** 2 · **Labels:** bug, good first issue · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — `buildCarryForward()` L788: `state.reflections.find(r => r.phase === phase)`.
 
@@ -175,7 +173,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-7 — Re-submitting an artifact overwrites the previous file without trace
 
-**Severity:** medium · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** open
+**Severity:** medium · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — `submitArtifact()` L195: `fs.writeFile(path.join(artifactsDir, filename), ...)`.
 
@@ -203,7 +201,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### CYC-9 — Cleanup deletes cycle state by age alone
 
-**Severity:** high · **Stage:** 1 · **Labels:** bug · **Status:** open
+**Severity:** high · **Stage:** 1 · **Labels:** bug · **Status:** fixed in #6
 
 **Where:** `src/core/orchestrator/cycleOrchestrator.ts` — `cleanupOldCycles()` L67-91: any `.json`/`.jsonl` in `cyclesDir` with `mtime` older than 7 days is unlinked; called from `startCycle()` at L100.
 
@@ -272,7 +270,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### MEM-1 — `invalidate_bulk` mutates in memory only
 
-**Severity:** high · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** open
+**Severity:** high · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** fixed in #6
 
 **Where:** `src/core/tools/unified/memoryTool.ts` — `case 'invalidate_bulk'` L826-838: sets `confidence *= 0.3` and `invalidatedAt` on the fetched record and never calls a persist/update method.
 
@@ -286,7 +284,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### MEM-2 — Confidence `0` becomes `0.5` on load
 
-**Severity:** high · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** open
+**Severity:** high · **Stage:** 1 · **Labels:** bug, good first issue · **Status:** fixed in #6
 
 **Where:** `src/memory/auto/unified-memory-core.ts` — `convertToRecord()` L1248: `confidence: data.confidence || 0.5`.
 
@@ -316,7 +314,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### MEM-4 — Loading more than 2000 long-term records evicts and then rewrites the file
 
-**Severity:** high · **Stage:** 1 · **Labels:** bug · **Status:** open
+**Severity:** high · **Stage:** 1 · **Labels:** bug · **Status:** fixed in #6
 
 **Where:** `src/memory/memorySystem.ts` — `longterm: new BoundedMap(2000)` L66; `loadPersisted()` L195-203 does `clear()` then `set()` for every entry in the file.
 

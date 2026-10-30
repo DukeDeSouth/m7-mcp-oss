@@ -16,7 +16,7 @@
  * Every `get` / `set` promotes the key to most-recently-used.
  */
 export class BoundedMap<K, V> extends Map<K, V> {
-  private readonly maxSize: number;
+  private maxSize: number;
 
   constructor(maxSize: number, entries?: Iterable<[K, V]>) {
     super();
@@ -59,6 +59,13 @@ export class BoundedMap<K, V> extends Map<K, V> {
   /** Current capacity limit. */
   get capacity(): number {
     return this.maxSize;
+  }
+
+  /** MEM-4: Raise capacity (never shrink). Used after loading a large persisted level file. */
+  setMaxSize(newMax: number): void {
+    if (newMax < 1) throw new RangeError('BoundedMap maxSize must be >= 1');
+    if (newMax <= this.maxSize) return;
+    this.maxSize = newMax;
   }
 }
 
