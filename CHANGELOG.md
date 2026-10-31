@@ -40,6 +40,10 @@ Stage 1 remainder + Stage 2 cycle protocol — see [docs/COMMUNITY_SPRINT.md](do
 
 ## [Unreleased]
 
+### Removed
+- Modules unreachable from `src/index.ts` (including HYG-6) and the tests that only covered them. `tools/list` output is unchanged.
+- Unused npm dependencies: `chromadb`, `chromadb-default-embed`, `chokidar`, `lodash.debounce`, `lru-cache`, `p-queue`, `semver`, `zod-to-json-schema`, `@types/json-schema`. The ChromaDB HTTP health check and `CHROMA_URL` are unchanged.
+
 ## [Unreleased — prior epistemic work]
 
 ### Added
