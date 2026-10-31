@@ -75,7 +75,9 @@ assert.notEqual(
 rmSync(emptyProjectsDirForHome, { recursive: true, force: true });
 
 resetEnv();
-const homeSlug = home.replace(/^\//, '').replace(/\//g, '-');
+const homeSlug = home
+  .replace(/^(?:[A-Za-z]:)?[\\/]/, '')
+  .replace(/[\\/]/g, '-');
 const fakeProject = join(home, 'Documents', 'dev', 'TestM7SlugDecode');
 mkdirSync(fakeProject, { recursive: true });
 writeFileSync(join(fakeProject, 'package.json'), '{}');
