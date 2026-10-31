@@ -108,7 +108,7 @@ const baseAfter = await memCore.get(base.id);
 assert.ok(baseAfter);
 assert.ok(contra.confidence <= 0.9 * CONTRADICT_CONFIDENCE_FACTOR + 0.001);
 assert.ok(baseAfter.confidence <= 0.9 * CONTRADICT_CONFIDENCE_FACTOR + 0.001);
-assert.ok(memCore.getActiveConflicts().length >= 1);
+assert.ok((await memCore.getActiveConflicts()).length >= 1);
 
 // R8 — store without relations unchanged confidence
 const plain = await memCore.store('plain', { level: 'L0', confidence: 0.75 });

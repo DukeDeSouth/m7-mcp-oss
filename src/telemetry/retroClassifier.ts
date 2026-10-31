@@ -13,6 +13,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { getProjectPath } from '../core/utils/projectPath.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -523,7 +524,7 @@ export function retroClassifyFile(
  * Writes to .m7/training-data/classified-events.jsonl
  */
 export function runRetroClassification(projectPath?: string): RetroClassificationStats {
-  const base = projectPath || process.cwd();
+  const base = projectPath || getProjectPath();
   const inputPath = join(base, '.m7', 'training-data', 'all-events.jsonl');
   const outputPath = join(base, '.m7', 'training-data', 'classified-events.jsonl');
 

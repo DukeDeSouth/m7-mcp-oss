@@ -119,7 +119,7 @@
 
 Две параллельные структуры:
 
-- **Журнал цикла** — `m7-cycles/<task-id>/` с файлами `INTAKE.md`, `DISCOVERY.md`, `ARCHITECTURE.md`, `SOLUTION_PLAN.md`, `IMPACT_ANALYSIS.md`, `SIMULATION.md`, `IMPLEMENTATION.md`; записывается оркестратором при прохождении ворот. По завершении — строка в `CYCLE_REGISTRY.md` (корень проекта).
+- **Журнал цикла** — `m7-cycles/<slug>-<суффикс task-id>/` (своя папка у каждого цикла) с файлами `INTAKE.md`, `DISCOVERY.md`, `ARCHITECTURE.md`, `SOLUTION_PLAN.md`, `IMPACT_ANALYSIS.md`, `SIMULATION.md`, `IMPLEMENTATION.md`; записывается оркестратором при прохождении ворот. По завершении — строка в `CYCLE_REGISTRY.md` (корень проекта).
 - **Рабочие документы задачи** — `docs/debug/<task>/` (для `light` — `docs/features/<task>/`): `DISCOVERY_REPORT.md`, `ARCHITECTURE_CONTEXT.md`, `SOLUTION_PLAN.md`, `IMPACT_ANALYSIS.md`, `IMPLEMENTATION_SIMULATION.md`, `RISK_MITIGATION.md`, `IMPLEMENTATION_REPORT.md`; создаются `mcp_m7_analyze_task` при открытии новой сессии (отдельный тул `mcp_m7_create_structure` — deprecated), заполняются агентом.
 
 Состояние цикла — `.m7/`; новый сеанс продолжает с текущей фазы.

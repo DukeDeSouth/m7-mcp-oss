@@ -7,7 +7,6 @@
 export { 
   checkSystemHealth, 
   formatHealthStatus, 
-  tryStartDocker,
   clearHealthCache,
   type ComponentStatus,
   type SystemHealth 

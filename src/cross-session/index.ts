@@ -13,6 +13,8 @@ export { SessionAnalyzer } from './session-analyzer.js';
 export { InsightExtractor } from './insight-extractor.js';
 export { KnowledgeAccumulator } from './knowledge-accumulator.js';
 
+import * as path from 'path';
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { SessionAnalyzer } from './session-analyzer.js';
 import { InsightExtractor } from './insight-extractor.js';
 import { KnowledgeAccumulator } from './knowledge-accumulator.js';
@@ -56,11 +58,11 @@ export class CrossSessionLearning {
   private currentSessionId: string | null = null;
   private initialized: boolean = false;
 
-  constructor(config: Partial<CrossSessionConfig> = {}) {
+  constructor(config: Partial<CrossSessionConfig> = {}, projectPath: string = getProjectPath()) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.analyzer = new SessionAnalyzer();
+    this.analyzer = new SessionAnalyzer(path.basename(projectPath) || 'unknown');
     this.extractor = new InsightExtractor(this.config.insightThreshold);
-    this.accumulator = new KnowledgeAccumulator(this.config);
+    this.accumulator = new KnowledgeAccumulator(this.config, projectPath);
   }
 
   /**
@@ -311,16 +313,20 @@ export class CrossSessionLearning {
 // SINGLETON INSTANCE
 // ============================================
 
-let instance: CrossSessionLearning | null = null;
+// One instance per project: knowledge learned in one project is stored and read there only.
+const instances = new Map<string, CrossSessionLearning>();
 
 export function getCrossSessionLearning(config?: Partial<CrossSessionConfig>): CrossSessionLearning {
+  const projectPath = getProjectPath();
+  let instance = instances.get(projectPath);
   if (!instance) {
-    instance = new CrossSessionLearning(config);
+    instance = new CrossSessionLearning(config, projectPath);
+    instances.set(projectPath, instance);
   }
   return instance;
 }
 
 export function resetCrossSessionLearning(): void {
-  instance = null;
+  instances.clear();
 }
 

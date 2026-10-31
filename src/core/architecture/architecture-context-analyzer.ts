@@ -7,7 +7,7 @@ const log = createLogger('[architecturecontextanalyzer]');
  * перед анализом задачи. Помогает AI понять "как это уже сделано".
  */
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import { 
@@ -21,7 +21,26 @@ import {
 import { KeywordExtractor, getKeywordExtractor } from './keyword-extractor.js';
 import { getKnowledgeGraph } from '../../knowledge-graph/index.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/**
+ * ripgrep argv for one keyword (no shell). The explicit `.` path keeps rg from
+ * reading stdin when the server's stdin is a pipe.
+ */
+export function buildRipgrepArgs(keyword: string): string[] {
+  return [
+    '--json',
+    '-C', '1',
+    '--max-count', '3',
+    '--max-filesize', '100K',
+    '--type', 'ts',
+    '--type', 'js',
+    '--fixed-strings',
+    '-e', keyword,
+    '--',
+    '.',
+  ];
+}
 
 // ============================================
 // ANALYZER CLASS
@@ -123,11 +142,9 @@ export class ArchitectureContextAnalyzer {
     
     for (const keyword of keywords.slice(0, this.config.maxKeywords)) {
       try {
-        // Escape special regex characters
-        const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        
-        const { stdout } = await execAsync(
-          `rg "${escapedKeyword}" --type ts --type js --json -C 1 --max-count 3 --max-filesize 100K`,
+        const { stdout } = await execFileAsync(
+          'rg',
+          buildRipgrepArgs(keyword),
           { 
             cwd: projectPath, 
             timeout: this.config.ripgrepTimeoutMs,
@@ -143,7 +160,7 @@ export class ArchitectureContextAnalyzer {
             const data = JSON.parse(line);
             
             if (data.type === 'match') {
-              const filePath = data.data.path.text;
+              const filePath = String(data.data.path.text).replace(/^\.\//, '');
               
               // Skip node_modules, dist, etc.
               if (filePath.includes('node_modules') || 
@@ -165,8 +182,8 @@ export class ArchitectureContextAnalyzer {
           }
         }
       } catch (error: any) {
-        // Timeout or no results - continue with next keyword
-        if (!error.message.includes('No matches found')) {
+        // rg exits 1 when nothing matched; anything else (ENOENT, timeout) is worth a debug line
+        if (error.code !== 1) {
           log.debug(`ArchContext] ripgrep error for "${keyword}": ${error.message}`);
         }
       }

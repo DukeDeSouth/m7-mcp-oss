@@ -63,6 +63,7 @@ export function createTaskTransferTool(orchestrator: TaskOrchestrator) {
       const { action, reason, new_title, task_id, session_id } = TaskTransferRequestSchema.parse(request);
       
       // Get current session
+      await orchestrator.ready();
       const sessions = orchestrator.getAllActiveSessions();
       const currentSession = session_id 
         ? sessions.find(s => s.id === session_id)

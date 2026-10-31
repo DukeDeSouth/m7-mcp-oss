@@ -42,7 +42,7 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Change**
 1. Add `private queues = new Map<string, Promise<unknown>>()`; wrap the bodies of `submitArtifact` and `submitReflection` in `enqueue(taskId, fn)` *(new)* that chains on the previous promise and clears the entry when done.
 2. Add `lastAccepted` to `CycleState`; compute `sha256(content)` at the top of each submit.
-3. If `lastAccepted` matches `{ phase, kind, sha256 }`, return the stored last response (keep `lastResponse` in state or regenerate via `getCurrentInstruction`) without mutating anything.
+3. If `lastAccepted.sha256` matches, return the stored last response (keep `lastResponse` in state or regenerate via `getCurrentInstruction`) without mutating anything. Match on the hash alone, not on `{ phase, kind }`: after an accepted reflection the phase has moved on, and `cycleTool` routes the retried reflection JSON to `submitArtifact` (3.19.0 matched all three and missed this).
 
 **Touches:** `src/core/orchestrator/cycleOrchestrator.ts` → `submitArtifact`, `submitReflection`, `enqueue` *(new)*; `src/core/orchestrator/types/cycle.ts` → `CycleState`.
 
@@ -56,7 +56,7 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 
 **Change**
 1. Set `state.status = 'completed'` on the last-phase path in `transitionToNextPhase()` and in `submitArtifact()`'s completion branch; `'aborted'` in the `abort` case of `submitReflection()`.
-2. At the top of both submit methods: if `status !== 'active'`, return `{ success: false, error: \`Cycle is ${status}\` }`.
+2. At the top of both submit methods: if `status !== 'active'`, return ``{ success: false, error: `Cycle is ${status}` }``.
 3. `formatCompletionResponse()` takes `(taskId, status, lastPhase)` and renders different text for completed vs aborted.
 
 **Touches:** `src/core/orchestrator/cycleOrchestrator.ts` → `transitionToNextPhase`, `submitArtifact`, `submitReflection`; `src/core/tools/cycleTool.ts` → `formatCompletionResponse`.
@@ -154,6 +154,22 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 
 **Watch out:** `cleanupOldCycles` runs on every `startCycle`; parsing every file each time is fine for dozens, not thousands — cap the scan or run it once per process.
 
+### CYC-10 — Cycles with the same description share one artifact folder
+
+**Size:** M · **Depends on:** CYC-4, CYC-7, HYG-1 · **Uses:** B1
+
+**Change**
+1. `allocateCycleIdentity(description, projectPath)` *(new)*: draw one random suffix, build the task ID from it (`generateTaskId(description, suffix)`) and the folder name `<generateSlug(description)>-<suffix>`. Skip a suffix whose ID is in `this.cycles`, in a set of IDs reserved by starts still in progress, or has a state file; create the folder with a non-recursive `mkdir` and treat `EEXIST` as taken. Give up after a few attempts with an error instead of sharing.
+2. `startCycle()` uses it, commits state, and removes the folder again if the state write fails; the reservation is released either way.
+3. `cleanupOldCycles(projectPath)` takes the project of the cycle being started instead of the directory captured by the constructor.
+4. Folder paths keep coming from `state.taskSlug` everywhere, so cycles created before the change keep their folders.
+
+**Touches:** `src/core/orchestrator/cycleOrchestrator.ts` → `startCycle`, `generateTaskId`, `cleanupOldCycles`, `allocateCycleIdentity` *(new)*, `nextIdSuffix` *(new)*.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` `[CYC-10]` — two cycles with one description, 20 parallel starts, taken ID or folder (stub `nextIdSuffix`), all suffixes taken, legacy slug, unwritable `.m7/cycles`, cleanup after a project switch. `tests/deepScanE2E.test.mjs` — two cycles through the server.
+
+**Watch out:** The suffix check and the folder creation must happen before the first `await` that could let a parallel start in, or the reservation set has to cover the gap; `mkdir({ recursive: true })` succeeds on an existing folder and hides the collision.
+
 ## Persisted state
 
 ### STATE-1 — Failed state write is reported as success; backups are never consulted for corrupt files
@@ -185,6 +201,53 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Test:** `tests/test-session-persistence.mjs` or a new `tests/taskOrchestrator.test.mjs` — fresh session → `false`; with `force: true` → `true` and `forcedCompletion` recorded.
 
 **Watch out:** Other callers of `isPhaseCompleted` (line 596, phase advancement) will change behavior for phases with no requirements; check they do not get stuck.
+
+### STATE-3 — Task sessions are lost on exit and invisible right after start
+
+**Size:** M · **Depends on:** MEM-3 · **Uses:** —
+
+**Change**
+1. `TaskOrchestrator.flushPersist()` *(new)*: clear the pending debounce timer and write now. Register it with `registerShutdownContributor` where the server creates the orchestrator, and call it on the old orchestrator before `onProjectPathChange` replaces it.
+2. Resolve the sessions file path once in the constructor (`sessionsFilePath` field); `getSessionsFilePath()` returns the field.
+3. Keep the promise of the constructor's `loadSessions()`; `ensureSessionsLoaded()` awaits it instead of starting a second load. Add a public `ready()` and await it before every synchronous read on a tool or resource path (`sessionTool` handler, `analyzeTask` reuse check, `taskTransferTool`, `scopeTool`, `m7://status`, `m7://session`, the hint block in the tool wrapper, `healthCheck`).
+
+**Touches:** `src/core/orchestrator/taskOrchestrator.ts` → constructor, `getSessionsFilePath`, `schedulePersist`, `ensureSessionsLoaded`, `flushPersist` *(new)*, `ready` *(new)*; `src/index.ts` → orchestrator creation, `onProjectPathChange`, resources, tool wrapper; the four tool files above.
+
+**Test:** `tests/deepScanE2E.test.mjs` — real server, `analyze_task`, SIGTERM at once, file present, `status` and `m7://session` after restart. `tests/deepScanAcceptance.test.mjs` — fresh orchestrator over an existing file answers the first `status` call; an orchestrator built for A keeps writing to A after the active project changes.
+
+**Watch out:** A new synchronous reader added later reintroduces (c) silently; the in-process race test only covers `status`, so keep `ready()` at the entry of any new tool that reads sessions.
+
+### STATE-4 — Cross-session knowledge and other project state follow `process.cwd()`
+
+**Size:** M · **Depends on:** — · **Uses:** —
+
+**Change**
+1. `KnowledgeAccumulator` takes `projectPath` (default `getProjectPath()`) and builds `basePath` from it; save failures go to `log.warn`. `SessionAnalyzer` derives its project ID from `getProjectPath()`; `extractProjectId()` goes away.
+2. `CrossSessionLearning` takes `projectPath` and passes it down. `getCrossSessionLearning()` keeps one instance per resolved project (a `Map`), and `cross-session-tool.ts` drops its own module-level cache and asks for the instance on every call.
+3. Every other `process.cwd()` that stands for "the project" becomes `getProjectPath()`: arch advisor default, visualizer graph root, mesh join/registration (and the tool description), telemetry exporters, hook telemetry fallback, retro classifier, git capture.
+4. `gitCapture.ts`: `git(args: string[], cwd?)` via `execFileSync('git', args)`; `buildExcludeArgs()` returns an argv array of `:(exclude)<pattern>` entries.
+
+**Touches:** `src/cross-session/knowledge-accumulator.ts`, `session-analyzer.ts`, `index.ts`; `src/core/tools/v3/cross-session-tool.ts`, `arch-advisor-tool.ts`, `visualizer-tool.ts`; `src/mesh/MeshManager.ts`, `src/mesh/tools/meshTool.ts`; `src/telemetry/exporters.ts`, `retroClassifier.ts`, `gitCapture.ts`; `src/core/telemetry/index.ts`.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` — static `process.cwd()` allowlist over `src/`; forced session completion with cwd ≠ project writes `stats.json` under the project only; per-project instances; staged-diff capture in a temp git repo, with and without the `cwd` argument, excludes `yarn.lock`. `tests/deepScanE2E.test.mjs` — server started from another directory.
+
+**Watch out:** Code that captures `getCrossSessionLearning()` once and keeps it outlives a project switch. `TaskOrchestrator` is fine (it is replaced on switch), the hive orchestrators are created per call; a new long-lived holder would bring the bug back. The allowlist in the static test is the place to justify any new `process.cwd()`.
+
+### STATE-5 — The contract registry reports success and keeps almost nothing
+
+**Size:** S · **Depends on:** STATE-1 · **Uses:** B1
+
+**Change**
+1. `ContractRegistry` keeps the load promise (`ready()`); the handler awaits it before any action.
+2. `loadExistingContracts()` reads all four `api_contracts` sections and keeps the stored `id`, `createdAt` and `lastModified`.
+3. `updateSchema()` rethrows after logging. `registerContract()` restores the previous entry on failure and returns `{ success: false, error }`; re-registering a name keeps its `id` and `createdAt`.
+4. Registrations run one at a time per process (load → modify → write of one file). The map is unbounded, because it is written whole.
+
+**Touches:** `src/core/tools/critical/contracts.ts` → `ContractRegistry` constructor, `ready` *(new)*, `loadExistingContracts`, `registerContract`, `updateSchema`, handler `register`.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` `[STATE-5]` — four kinds survive a restart with their IDs, re-register, no schema, unparseable schema. `tests/deepScanE2E.test.mjs` — the same through the server.
+
+**Watch out:** `SchemaSystem.updateSection()` replaces arrays and merges objects; if the stored shape becomes a map keyed by name, the merge rules change with it. Other writers of `PROJECT_SCHEMA.yaml` are not in the registry's queue.
 
 ## Memory
 
@@ -263,6 +326,53 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 
 **Watch out:** The in-process memory ceiling this bound was protecting against still matters for long sessions; the guard in step 2 is what keeps the fix from becoming "no limit at all".
 
+Done differently in the end: the bound was raised at load time first, which left runtime eviction in place (MEM-5). The persisted levels are now plain maps; the guard from step 2 stays.
+
+### MEM-5 — Runtime eviction from bounded collections deletes records from disk
+
+**Size:** S · **Depends on:** MEM-4 · **Uses:** —
+
+**Change**
+1. `longterm`, `conceptual` and `fogOfWar` become plain `Map`s; `surface` and `working` keep their bounds (RAM only).
+2. Drop `resizeStorageCap()` and the default caps; keep `loadedEntryCount` / `explicitDeletes` and the refusal to persist a map smaller than what was loaded.
+3. `deletedIds` in `unified-memory-core.ts` becomes a plain `Set`.
+
+**Touches:** `src/memory/memorySystem.ts` → constructor, `loadPersistedMemory`; `src/memory/auto/unified-memory-core.ts` → `deletedIds`.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` `[MEM-5]` — the review's 1 + 2000 trace, conceptual 1001, the public `store` path, fog 600 + 501, tombstones 5001 + 1, an early write before the load.
+
+**Watch out:** `recordStore` stays bounded on purpose: it is a cache, and a miss falls through to `MemorySystem`. Anything new that is both bounded and written whole repeats this item.
+
+### MEM-6 — Every schema read stores another copy of the schema in long-term memory
+
+**Size:** S · **Depends on:** — · **Uses:** —
+
+**Change**
+1. Remove the `memoryCore.store(...)` block from `SchemaSystem.loadSchema()`, with the `memoryCore` field and the import.
+
+**Touches:** `src/schema/schemaSystem.ts` → `loadSchema`.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` `[MEM-6]` — three `loadSchema()` calls, record count unchanged. `tests/deepScanE2E.test.mjs` — three `analyze_task` calls leave no copy.
+
+**Watch out:** Copies written by older versions stay in users' `longterm.json`; KNOWN_ISSUES says how to find them.
+
+### MEM-7 — Memory flushes overlap and are not awaited, so writes are lost
+
+**Size:** M · **Depends on:** MEM-3 · **Uses:** —
+
+**Change**
+1. `MemorySystem` gets one write chain: `serializeWrite(task)` runs a write after the previous one. `flushPendingWrites()` queues at most one flush (later stores join it) and returns its promise; level, fog and project writes and `delete()` all go through the chain.
+2. `shutdown()` awaits the queued flush and then the chain.
+3. `store()`, `discoverTechnicalDetail()` and `updateProjectMemory()` await `ensureLoaded()`.
+4. `getMemoryCore()` and the project-change hook retire the previous core: call its `shutdown()` and keep the promise; `shutdownMemoryCore()` awaits the current core and every retiring one.
+5. Tombstone writes in `UnifiedMemoryCore` get the same kind of chain, reading the set when the write starts.
+
+**Touches:** `src/memory/memorySystem.ts` → `scheduleFlush`, `flushPendingWrites`, `serializeWrite` *(new)*, `shutdown`, `store`, `delete`, `discoverTechnicalDetail`, `updateProjectMemory`; `src/memory/auto/unified-memory-core.ts` → `getMemoryCore`, `retireMemoryCore` *(new)*, `shutdownMemoryCore`, `persistTombstones`, `shutdown`.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` `[MEM-7]` — 50 / 120 / 2000 stores then exit, 500 stores without shutdown, a delete during flushes, a store right before a project switch.
+
+**Watch out:** A write task that awaits `flushPendingWrites()` from inside the chain waits for itself; keep writes inside the chain free of calls back into it.
+
 ## Task graph and transfer
 
 ### GRAPH-1 — Depth-limited DFS marks nodes visited at the wrong depth
@@ -285,7 +395,7 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Size:** S · **Depends on:** — · **Uses:** —
 
 **Change**
-1. `newTaskId = \`task_${slug}_${randomBytes(3).toString('hex')}\`` (or a monotonic counter persisted in the graph).
+1. ``newTaskId = `task_${slug}_${randomBytes(3).toString('hex')}` `` (or a monotonic counter persisted in the graph).
 2. `createTask()` throws if `graph.nodes[id]` exists.
 
 **Touches:** `src/core/task-transfer/transferManager.ts` → ID generation in `transfer`; `src/core/task-graph/taskGraphManager.ts` → `createTask`.
@@ -300,14 +410,14 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 
 **Change**
 1. Add `deleteTask(id)` *(new)* to `TaskGraphManager` (removes node and its links, saves).
-2. In `transfer()`, wrap `createTask` → `updateTaskStatus` → `createLink` in `try`; on failure, `deleteTask(newTaskId)` and restore the old status, then rethrow.
+2. In `transfer()`, snapshot the source node (`structuredClone`) before the first mutation and wrap `createTask` → `updateTaskStatus` → `createLink` in `try`; on failure, `deleteTask(newTaskId)` and `restoreTask(snapshot)` *(new)*, then report the error. Restoring only `status` is not enough: `updateTaskStatus('transferred')` also sets `outcome` and `completed` (this is what 3.21.0 missed).
 3. Alternative: add `applyBatch(mutations)` *(new)* that mutates a clone of `graph` and calls `save()` once — one write, no partial state.
 
 **Touches:** `src/core/task-transfer/transferManager.ts` → `transfer`; `src/core/task-graph/taskGraphManager.ts` → `deleteTask` *(new)* or `applyBatch` *(new)*, `save`.
 
 **Test:** `tests/taskGraph.test.mjs` — stub `createLink` to throw; graph JSON before equals graph JSON after.
 
-**Watch out:** `saveTaskMeta()` also writes files under `docs/debug/<id>`; the rollback has to remove those too, or document that they are left behind.
+**Watch out:** `saveTaskMeta()` also writes files under `docs/debug/<id>`; the rollback has to remove those too, or document that they are left behind. (As of 3.22.1 `executeTransfer` never creates that folder, so `saveTaskMeta` fails with a warning and nothing is left on disk; the acceptance test asserts that.)
 
 ## Gates and output
 
@@ -363,6 +473,7 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Change**
 1. In `generateTaskId()` / `generateSlug()`: if the Latin slug is empty, use the first 8 hex chars of `sha1(description)`.
 2. Replace the clock suffix with `randomBytes(3).toString('hex')`.
+3. `generateSlug()` names the artifact folder; give it a Unicode filter (`[^\p{L}\p{M}\p{N}\s-]` with `u`) plus the same hash fallback. 3.21.1 changed only `generateTaskId`, so CJK, emoji and punctuation-only descriptions still wrote artifacts into the `m7-cycles/` root.
 
 **Touches:** `src/core/orchestrator/cycleOrchestrator.ts` → `generateTaskId`, `generateSlug`.
 
@@ -389,7 +500,7 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Size:** S · **Depends on:** — · **Uses:** —
 
 **Change**
-1. Replace `execAsync(cmd)` with `execFile('grep', ['-r', '-c', '-i', keyword, ...excludeArgs, ...includeArgs, projectPath])` (promisified).
+1. Replace `execAsync(cmd)` with `execFile('grep', ['-r', '-c', '-i', '-e', keyword, ...excludeArgs, ...includeArgs, '--', projectPath])` (promisified). `-e` and `--` keep a keyword or path that starts with `-` from being read as an option.
 2. Handle exit code 1 (no matches) as empty output rather than an error.
 
 **Touches:** `src/hive/context/fileSearcher.ts` → the search function around L44.
@@ -405,8 +516,9 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Change**
 1. Delete `src/test-tool.ts` and its registration in the tool list.
 2. If a diagnostic is still wanted, fold "key present: yes/no" into `mcp_m7_doctor`.
+3. Reduce the other prefix sites to present/absent: the `mcp_m7_hive_coordinator` "Debug Info" block and debug log, and the `M7_DEBUG` startup log in `src/index.ts`.
 
-**Touches:** `src/test-tool.ts` (remove); the tool registry that imports it; `docs/TOOLS_REGISTRY.md`.
+**Touches:** `src/test-tool.ts` (remove); the tool registry that imports it; `docs/TOOLS_REGISTRY.md`; `src/hive/tools/hiveCoordinator.ts`; `src/index.ts`.
 
 **Test:** tool list does not contain `mcp_m7_test_tool`; `npm run build` passes.
 
@@ -439,6 +551,80 @@ Several plans rely on the same primitive. Whoever lands the first PR in each gro
 **Test:** `npm run build` passes; `npm test` unchanged.
 
 **Watch out:** —
+
+### HYG-7 — Architecture context search runs task text through a shell
+
+**Size:** S · **Depends on:** — · **Uses:** —
+
+**Change**
+1. `buildRipgrepArgs(keyword)` *(new, exported)*: `['--json', '-C', '1', '--max-count', '3', '--max-filesize', '100K', '--type', 'ts', '--type', 'js', '--fixed-strings', '-e', keyword, '--', '.']`. `--fixed-strings` replaces the hand-written regex escape; the explicit `.` stops `rg` from reading the server's stdin.
+2. `searchWithRipgrep` calls `execFile('rg', buildRipgrepArgs(kw), { cwd: projectPath, timeout, maxBuffer })`; exit code 1 is "no matches", anything else is logged.
+3. Strip a leading `./` from `data.path.text` so result paths look the same as before.
+
+**Touches:** `src/core/architecture/architecture-context-analyzer.ts` → `searchWithRipgrep`, `buildRipgrepArgs` *(new)*.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` — the injection payload with `PATH=/usr/bin:/bin` creates no file; with `rg` installed, a marker identifier is found in well under the 2000 ms timeout; the argv keeps the keyword as one element.
+
+**Watch out:** The "found" test needs `rg`; it skips when `rg` is missing, the injection test does not.
+
+### HYG-8 — Server reports version 2.0.0 regardless of the package version
+
+**Size:** S · **Depends on:** — · **Uses:** —
+
+**Change**
+1. `src/core/utils/packageVersion.ts` *(new)*: `PACKAGE_VERSION` read once from `new URL('../../../package.json', import.meta.url)` (same depth from `src/` and `dist/`).
+2. Use it for `McpServer({ version })` and the `m7://status` resource; replace the private `getM7Version()` in `src/telemetry/collector.ts` with it.
+
+**Touches:** `src/index.ts`, `src/telemetry/collector.ts`, `src/core/utils/packageVersion.ts` *(new)*.
+
+**Test:** `tests/deepScanE2E.test.mjs` — `client.getServerVersion().version` and `m7://status` `version` equal `package.json`.
+
+**Watch out:** Per-tool `version` fields in `src/core/registry/toolsRegistry.ts` are tool versions, not the package version; leave them.
+
+### HYG-9 — `analyze_task` runs `docker compose up -d` on a compose file from the working directory
+
+**Size:** S · **Depends on:** — · **Uses:** —
+
+**Change**
+1. Delete `tryStartDocker()`, the `autoStartDocker` option and the `dockerStartAttempted` / `dockerStartSuccess` fields and their output block; drop the export from `src/core/health/index.ts`.
+2. ChromaDB offline hint: `optional: start ChromaDB at <CHROMA_URL> or set CHROMA_URL; memory uses local JSON until then`. Command-style hints carry their own backticks; the formatter prints the hint as is.
+3. `analyzeTask.ts` calls `checkSystemHealth()` without options.
+
+**Touches:** `src/core/health/healthCheck.ts`, `src/core/health/index.ts`, `src/core/tools/analyzeTask.ts`.
+
+**Test:** `tests/deepScanE2E.test.mjs` — server started from a directory with `compose.yml` and a stub `docker` on `PATH`, `CHROMA_URL` at a closed port: stub never called, response names the URL and does not mention docker. `tests/deepScanAcceptance.test.mjs` — `checkSystemHealth()` result and hint; `tryStartDocker` not exported.
+
+**Watch out:** Pin `CHROMA_URL` in the tests; a ChromaDB running on the developer's machine at the default port makes the health block "healthy" and the assertions about the hint vacuous.
+
+### HYG-10 — Unreachable modules keep defects that the live paths no longer have
+
+**Size:** S · **Depends on:** HYG-3, HYG-7 · **Uses:** —
+
+**Change**
+1. Delete `src/core/verification/`, `src/core/tools/v3/auto-memory-tool.ts`, and the modules only it imports: `src/memory/auto/{index,project-registry,context-injector,types}.ts`.
+2. In `unified-memory-core.ts`, delete `PersistentMemory`, `createPersistentMemory`, `IndexReport`, `invalidateDependents()`, `updateWithInvalidation()`. Keep `getDependencyGraph()` / `getStaleRecords()` and the `dependencies` / `dependents` fields: `mcp_m7_memory store` still accepts `dependencies`.
+3. `projectScanner.scanGitInfo()`: `execFile('git', argv)`, each field read independently.
+
+**Touches:** the files above; `tests/phase2/test-smart-context.mjs` (drop the cascade cases).
+
+**Test:** `tests/deepScanAcceptance.test.mjs` — removed files absent from `src/` and `dist/`; removed exports and methods undefined; static scan of `child_process` imports in `src/` (only `execFile` / `execFileSync`, no `shell: true`); `scanGitInfo()` on a temp repo without `origin`.
+
+**Watch out:** `npm run build` must clean `dist/` first (it does, via `prebuild`), otherwise the removed modules survive in the build and the absence test passes or fails depending on build history.
+
+### HYG-11 — `require()` in ES modules throws, and the surrounding `catch` hides it
+
+**Size:** S · **Depends on:** — · **Uses:** —
+
+**Change**
+1. `knowledge-graph/index.ts`: static imports of `existsSync`, `statSync`, `join`, `getProjectPath` (no import cycle: `projectPath.ts` does not import the graph).
+2. `mesh/MeshManager.ts`: `import { homedir, hostname } from 'os'`.
+3. `tsi/index.ts`: `createTSISystem()` uses the `TSISystemClass` import already at the bottom of the file.
+
+**Touches:** the three files.
+
+**Test:** `tests/deepScanAcceptance.test.mjs` — TypeScript-AST scan of `src/` for `require(...)` calls; `createTSISystem()`; mesh `init` + `join` + `leave` in a temp directory.
+
+**Watch out:** Scan the AST, not the text: `require(` occurs in strings and regexes in `src/`. Pass a temp directory to `init()`; the default is `~/.m7/mesh`.
 
 ---
 

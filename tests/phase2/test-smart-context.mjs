@@ -134,43 +134,7 @@ async function testDependencyGraph() {
     assert.ok(record.lastValidated > Date.now() - 5000, 'Should be recent');
   });
   
-  // Test 5: Cascade invalidation
-  await asyncTest('Cascade invalidation marks dependents stale', async () => {
-    // Создаём цепочку зависимостей: A <- B <- C
-    const recordA = await memory.store('Record A (root)');
-    const recordB = await memory.store('Record B depends on A', {
-      dependencies: [recordA.id]
-    });
-    const recordC = await memory.store('Record C depends on B', {
-      dependencies: [recordB.id]
-    });
-    
-    // Инвалидируем A
-    const invalidated = await memory.invalidateDependents(recordA.id);
-    
-    assert.ok(invalidated.includes(recordB.id), 'B should be invalidated');
-    // C тоже должен быть инвалидирован через каскад
-    assert.ok(invalidated.includes(recordC.id), 'C should be invalidated via cascade');
-  });
-  
-  // Test 6: Update with invalidation
-  await asyncTest('Update triggers invalidation', async () => {
-    const parent = await memory.store('Parent record');
-    const child = await memory.store('Child depends on parent', {
-      dependencies: [parent.id]
-    });
-    
-    const result = await memory.updateWithInvalidation(
-      parent.id, 
-      'Updated parent content'
-    );
-    
-    assert.ok(result.record, 'Should return updated record');
-    assert.ok(result.invalidated.includes(child.id), 'Child should be invalidated');
-    assert.notStrictEqual(result.record.contentHash, parent.contentHash, 'Hash should change');
-  });
-  
-  // Test 7: Get dependency graph
+  // Test 5: Get dependency graph
   await asyncTest('Get dependency graph for record', async () => {
     const root = await memory.store('Graph root');
     const dep1 = await memory.store('Dep 1', { dependencies: [root.id] });
@@ -183,7 +147,7 @@ async function testDependencyGraph() {
     assert.strictEqual(graph.dependents.length, 2, 'Should have 2 dependents');
   });
   
-  // Test 8: Find stale records
+  // Test 6: Find stale records
   await asyncTest('Get stale records', async () => {
     // Создаём запись и сразу инвалидируем
     const record = await memory.store('Will be stale');
@@ -426,24 +390,7 @@ async function testIntegrationWithReliability() {
     assert.ok(attempts >= 1, 'Should have made at least 1 attempt');
   });
   
-  // Test 4: Dependency graph with atomic updates
-  await asyncTest('Dependency invalidation is atomic', async () => {
-    const memory = new UnifiedMemoryCore(testDir);
-    await memory.initialize();
-    
-    // Create dependency chain
-    const root = await memory.store('Atomic root');
-    const child1 = await memory.store('Atomic child 1', { dependencies: [root.id] });
-    const child2 = await memory.store('Atomic child 2', { dependencies: [root.id] });
-    
-    // Update root - should atomically invalidate children
-    const result = await memory.updateWithInvalidation(root.id, 'Updated atomic root');
-    
-    assert.strictEqual(result.invalidated.length, 2, 'Both children invalidated');
-    assert.ok(result.record.lastValidated > 0, 'New validation timestamp');
-  });
-  
-  // Test 5: Concurrent manifest updates
+  // Test 4: Concurrent manifest updates
   await asyncTest('Concurrent manifest updates are safe', async () => {
     const manifest1 = new ManifestManager(testDir);
     const manifest2 = new ManifestManager(testDir);
@@ -508,33 +455,7 @@ async function testPerformance() {
     assert.strictEqual(records.length, 100, 'All records created');
   });
   
-  // Test 2: Large dependency chain
-  await asyncTest('Handle deep dependency chain (10 levels)', async () => {
-    const memory = new UnifiedMemoryCore(testDir);
-    await memory.initialize();
-    
-    let prevId;
-    const chain = [];
-    
-    for (let i = 0; i < 10; i++) {
-      const deps = prevId ? [prevId] : [];
-      const record = await memory.store(`Chain level ${i}`, { dependencies: deps });
-      chain.push(record.id);
-      prevId = record.id;
-    }
-    
-    // Invalidate root
-    const startTime = Date.now();
-    const invalidated = await memory.invalidateDependents(chain[0]);
-    const duration = Date.now() - startTime;
-    
-    console.log(`     (10-level cascade in ${duration}ms)`);
-    
-    assert.ok(duration < 1000, 'Cascade should be fast');
-    assert.strictEqual(invalidated.length, 9, 'All children invalidated');
-  });
-  
-  // Test 3: Manifest with many files
+  // Test 2: Manifest with many files
   await asyncTest('Manifest handles 50 files', async () => {
     const manifest = new ManifestManager(testDir);
     const files = [];

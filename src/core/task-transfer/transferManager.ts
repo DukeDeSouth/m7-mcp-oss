@@ -11,6 +11,7 @@
  */
 
 import { createLogger } from '../utils/logger.js';
+import { randomBytes } from 'crypto';
 import {
   TaskTransfer,
   TransferReason,
@@ -23,6 +24,7 @@ import {
   SCOPE_ALERT_THRESHOLDS
 } from '../types/taskTransfer.js';
 import { getTaskGraphManager, TaskGraphManager } from '../task-graph/taskGraphManager.js';
+import { TaskNode } from '../types/taskGraph.js';
 import { TaskSession } from '../orchestrator/taskOrchestrator.js';
 import { ScopeContext } from '../scope/types.js';
 
@@ -55,8 +57,11 @@ export class TransferManager {
   private graphManager: TaskGraphManager;
   private options: ScopeCheckOptions;
   
-  constructor(options?: Partial<ScopeCheckOptions>) {
-    this.graphManager = getTaskGraphManager();
+  constructor(
+    options?: Partial<ScopeCheckOptions>,
+    graphManager?: TaskGraphManager,
+  ) {
+    this.graphManager = graphManager ?? getTaskGraphManager();
     this.options = { ...DEFAULT_SCOPE_CHECK_OPTIONS, ...options };
   }
   
@@ -185,11 +190,21 @@ export class TransferManager {
     scopeChange: ScopeChange,
     session?: TaskSession
   ): Promise<TransferResult> {
+    let newTaskId: string | undefined;
+    let fromSnapshot: TaskNode | undefined;
+
     try {
       await this.graphManager.initialize();
       
+      const fromTask = await this.graphManager.getTask(fromTaskId);
+      if (!fromTask) {
+        throw new Error(`Source task not found: ${fromTaskId}`);
+      }
+      // updateTaskStatus('transferred') also sets outcome and completed — restore the whole node on failure.
+      fromSnapshot = structuredClone(fromTask);
+      
       // Генерируем ID для новой задачи
-      const newTaskId = `task_${this.slugify(description)}_${Date.now().toString().slice(-4)}`;
+      newTaskId = `task_${this.slugify(description)}_${randomBytes(3).toString('hex')}`;
       const newFolder = `docs/debug/${newTaskId}`;
       
       // Создаём новую задачу в графе
@@ -245,6 +260,20 @@ export class TransferManager {
       };
       
     } catch (error: any) {
+      if (newTaskId) {
+        try {
+          await this.graphManager.deleteTask(newTaskId);
+        } catch (rollbackErr: any) {
+          log.error(`Transfer rollback delete failed: ${rollbackErr.message}`);
+        }
+      }
+      if (fromSnapshot !== undefined) {
+        try {
+          await this.graphManager.restoreTask(fromSnapshot);
+        } catch (rollbackErr: any) {
+          log.error(`Transfer rollback source restore failed: ${rollbackErr.message}`);
+        }
+      }
       log.error(`Transfer failed: ${error.message}`);
       return {
         success: false,

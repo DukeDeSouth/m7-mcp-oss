@@ -103,8 +103,6 @@ import { impactTool } from './core/tools/critical/impact.js';
 // Import Hive Multiagent System
 import { hiveCoordinatorTool } from './hive/tools/hiveCoordinator.js';
 import { APIManager } from './hive/api/apiManager.js';
-// Import Test Tool for debugging
-import { testTool } from './test-tool.js';
 
 // Import Knowledge Hub
 import { knowledgeHubTool } from './core/tools/knowledgeHub/knowledgeHubTool.js';
@@ -144,6 +142,7 @@ import { extractZodSchema } from './core/utils/schemaConverter.js';
 // Import project path utility
 import { getProjectPath, getProjectPathDiagnostics, initFromMcpRoots, onProjectPathChange, bindMcpServerForRoots, ensureProjectPathResolved } from './core/utils/projectPath.js';
 import { registerShutdownContributor } from './core/shutdown/flushOnExit.js';
+import { PACKAGE_VERSION } from './core/utils/packageVersion.js';
 class M7MCPServer {
   private server: McpServer;
   private memory: MemorySystem;
@@ -160,7 +159,7 @@ class M7MCPServer {
   constructor() {
     this.server = new McpServer({
       name: '@m7/mcp-server',
-      version: '2.0.0',
+      version: PACKAGE_VERSION,
     });
 
     // Determine project path (user's workspace, not M7 installation directory)
@@ -193,6 +192,7 @@ class M7MCPServer {
     this.schema = new SchemaSystem(this.journal, this.projectPath);
     this.router = new TaskRouter();
     this.orchestrator = new TaskOrchestrator(this.journal);
+    registerShutdownContributor(() => this.orchestrator.flushPersist());
     this.scopeGuard = new ScopeGuard(this.orchestrator, this.journal);
     this.apiManager = this.initializeAPIManager();
     
@@ -207,6 +207,10 @@ class M7MCPServer {
       this.memory = new MemorySystem(newPath);
       this.journal = new JournalSystem(newPath);
       this.schema = new SchemaSystem(this.journal, newPath);
+      const previousOrchestrator = this.orchestrator;
+      previousOrchestrator.flushPersist().catch(err =>
+        log(`[M7 Server] Session flush before project switch failed: ${err.message}`)
+      );
       this.orchestrator = new TaskOrchestrator(this.journal);
       this.scopeGuard = new ScopeGuard(this.orchestrator, this.journal);
       resetWarmupManager();
@@ -232,8 +236,8 @@ class M7MCPServer {
     }
     
     log(`🔑 [M7 Server] Loading API Keys:`);
-    log(`  OPENAI_API_KEY: ${openaiKey.substring(0,15)}...`);
-    log(`  ANTHROPIC_API_KEY: ${anthropicKey.substring(0,15)}...`);
+    log('  OPENAI_API_KEY: set');
+    log('  ANTHROPIC_API_KEY: set');
     
     const manager = new APIManager({ openai: openaiKey, anthropic: anthropicKey });
     log('✅ [M7 Server] Singleton APIManager created successfully');
@@ -437,15 +441,6 @@ class M7MCPServer {
       log('❌ [M7 DEBUG] impactTool registration failed:', error.message);
     }
     
-    // 16. Test Tool for MCP Debug
-    log('🧪 [M7 DEBUG] About to register Test Tool...');
-    try {
-      this.registerTool(testTool, (request: any) => testTool.handler(request));
-      log('✅ [M7 DEBUG] Test Tool registered successfully!');
-    } catch (error: any) {
-      log('❌ [M7 DEBUG] Test Tool registration failed:', error.message);
-    }
-
     // 17. Hive Coordinator Tool
     log('🔍 [M7 DEBUG] About to register Hive Coordinator Tool...');
     try {
@@ -650,6 +645,7 @@ class M7MCPServer {
         mimeType: 'application/json'
       },
       async (uri: URL) => {
+        await this.orchestrator.ready();
         const activeSessions = this.orchestrator.getAllActiveSessions();
         const pathDiagnostics = getProjectPathDiagnostics();
         
@@ -659,7 +655,7 @@ class M7MCPServer {
             mimeType: 'application/json',
             text: JSON.stringify({
               status: 'running',
-              version: '2.0.0',
+              version: PACKAGE_VERSION,
               tools: this.registeredToolNames.length,
               uptime: process.uptime(),
               memory: {
@@ -685,6 +681,7 @@ class M7MCPServer {
         mimeType: 'application/json'
       },
       async (uri: URL) => {
+        await this.orchestrator.ready();
         const activeSessions = this.orchestrator.getAllActiveSessions();
         
         return {
@@ -811,6 +808,7 @@ class M7MCPServer {
           if (!response.isError) {
             try {
               // Get current session if available
+              await this.orchestrator.ready();
               const activeSessions = this.orchestrator.getAllActiveSessions();
               const currentSession = activeSessions.length > 0 ? activeSessions[0] : null;
               

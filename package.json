@@ -1,6 +1,6 @@
 {
   "name": "@m7/mcp-server",
-  "version": "3.19.0",
+  "version": "3.22.2",
   "description": "M7 MCP Server - methodology-enforcing MCP server for AI coding agents: 7-phase cycle with reflection gates, persistent memory, fog of war, Hive multi-agent",
   "type": "module",
   "main": "dist/index.js",
@@ -9,10 +9,12 @@
     "@m7/mcp-server": "./dist/index.js"
   },
   "scripts": {
+    "prebuild": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js",
-    "test": "bash scripts/run-tests.sh"
+    "dev": "npm run build && node dist/index.js",
+    "test": "bash scripts/run-tests.sh",
+    "test:mutants": "node scripts/deep-scan-mutants.mjs"
   },
   "keywords": [
     "mcp",

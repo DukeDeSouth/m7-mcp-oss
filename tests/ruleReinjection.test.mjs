@@ -4,8 +4,10 @@
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
-process.env.M7_PROJECT_PATH = path.join(import.meta.dirname, '..');
+process.env.M7_PROJECT_PATH = mkdtempSync(path.join(tmpdir(), 'm7-rule-reinjection-'));
 process.env.M7_RULE_REINJECTION_THRESHOLD = '18';
 
 const {

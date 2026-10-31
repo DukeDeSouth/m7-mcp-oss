@@ -2,7 +2,7 @@
  * Unified Memory Core v5.0
  * 
  * Wrapper над существующими системами памяти для унифицированного API.
- * Объединяет MemorySystem (простая JSON память) и PersistentMemory (ChromaDB).
+ * Объединяет MemorySystem (простая JSON память) и опциональный ChromaDB.
  */
 
 import { MemorySystem, FogOfWarEntry } from '../memorySystem.js';
@@ -21,8 +21,10 @@ import {
   requiresConsolidation,
   validateConsolidation,
 } from '../promotionConsolidation.js';
+import path from 'path';
 import { getProjectPath, onProjectPathChange } from '../../core/utils/projectPath.js';
 import { createLogger } from '../../core/utils/logger.js';
+import { atomicWriteJSON, safeReadJSON } from '../../core/utils/atomicWrite.js';
 
 export type { MemoryRelationType, MemoryConflictEntry, DependencySpec } from '../memoryRelations.js';
 
@@ -219,7 +221,8 @@ export function resolveProvenance(record: MemoryRecord): ProvenanceFlags {
       || tags.includes('human-confirmed'),
     isRuntimeGuess:
       type === 'runtime-guess'
-      || tags.includes('runtime-guess'),
+      || tags.includes('runtime-guess')
+      || record.metadata?.provenance === 'mirror',
   };
 }
 
@@ -275,10 +278,21 @@ export function getEpistemicView(record: MemoryRecord, now = Date.now()): Episte
 // In-memory record store (for records created this session)
 // ============================================================================
 
-import { BoundedMap, BoundedSet } from '../../core/utils/boundedMap.js';
+import { BoundedMap } from '../../core/utils/boundedMap.js';
 
 const recordStore = new BoundedMap<string, MemoryRecord>(2000);
-const deletedIds = new BoundedSet<string>(5000); // Track deleted IDs to prevent resurrection
+// Tombstones are persisted whole; a bound would drop the oldest ones from disk (MEM-5)
+const deletedIds = new Set<string>();
+
+/** MEM-0: cap trust for Markdown mirror synthesis */
+export const MIRROR_MAX_CONFIDENCE = 0.6;
+
+interface RecordIterateFilter {
+  levels?: MemoryLevel[];
+  minConfidence?: number;
+  includeMirrors?: boolean;
+  query?: string;
+}
 
 function generateId(): string {
   return `mem_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -300,13 +314,194 @@ export type InvalidateResult =
  * Unified Memory Core - обёртка для унифицированного доступа к памяти
  */
 export class UnifiedMemoryCore {
+  private static readonly KEYED_STORAGE_LEVELS = [
+    'surface',
+    'working',
+    'longterm',
+    'conceptual',
+  ] as const;
+
   private memorySystem: MemorySystem;
   private projectPath: string;
   private initialized = false;
+  private tombstoneWrites: Promise<void> = Promise.resolve();
 
   constructor(projectPath?: string) {
     this.projectPath = projectPath || getProjectPath();
     this.memorySystem = new MemorySystem(this.projectPath);
+  }
+
+  private tombstonePath(): string {
+    return path.join(this.projectPath, '.m7', 'memory-tombstones.json');
+  }
+
+  private async loadTombstones(): Promise<void> {
+    const { data } = await safeReadJSON<{ version: 1; ids: string[] }>(
+      this.tombstonePath()
+    );
+    if (data?.ids) {
+      for (const id of data.ids) {
+        deletedIds.add(id);
+      }
+    }
+  }
+
+  /** MEM-7: the set is read when the write starts, so the last write always has every id */
+  private persistTombstones(): Promise<void> {
+    const run = this.tombstoneWrites.then(async () => {
+      await atomicWriteJSON(this.tombstonePath(), { version: 1, ids: [...deletedIds] });
+    });
+    this.tombstoneWrites = run.catch(() => {});
+    return run;
+  }
+
+  /** MEM-0: L4 user records persist keyed in longterm, not ProjectMemory merge */
+  private durableStorageLevel(record: MemoryRecord): string {
+    if (record.level === 'L4') {
+      return 'longterm';
+    }
+    return this.mapLevelToStorage(record.level);
+  }
+
+  private passesFilter(record: MemoryRecord, filter: RecordIterateFilter): boolean {
+    if (filter.levels && !filter.levels.includes(record.level)) {
+      return false;
+    }
+    const effective = this.applyConfidenceDecay(record);
+    if (filter.minConfidence != null && effective < filter.minConfidence) {
+      return false;
+    }
+    return true;
+  }
+
+  private async resolveRecord(
+    id: string,
+    opts?: { touchAccess?: boolean }
+  ): Promise<MemoryRecord | null> {
+    await this.initialize();
+    if (deletedIds.has(id)) {
+      return null;
+    }
+
+    const cached = recordStore.get(id);
+    if (cached !== undefined) {
+      if (opts?.touchAccess) {
+        cached.accessCount++;
+        cached.lastAccessedAt = new Date();
+      }
+      return cached;
+    }
+
+    for (const level of UnifiedMemoryCore.KEYED_STORAGE_LEVELS) {
+      const data = await this.memorySystem.retrieve(id, level);
+      if (
+        data !== null
+        && data !== undefined
+        && typeof data === 'object'
+        && data.content !== undefined
+      ) {
+        const converted = this.convertToRecord({ key: id, data, level });
+        recordStore.set(id, converted);
+        if (opts?.touchAccess) {
+          converted.accessCount++;
+          converted.lastAccessedAt = new Date();
+        }
+        return converted;
+      }
+    }
+    return null;
+  }
+
+  private async *iterateRecords(
+    filter: RecordIterateFilter
+  ): AsyncGenerator<MemoryRecord> {
+    await this.initialize();
+    const seen = new Set<string>();
+
+    for (const level of UnifiedMemoryCore.KEYED_STORAGE_LEVELS) {
+      const keys = await this.memorySystem.list(level);
+      for (const key of keys) {
+        if (deletedIds.has(key) || seen.has(key)) continue;
+        const rec = await this.resolveRecord(key, { touchAccess: false });
+        if (!rec || !this.passesFilter(rec, filter)) continue;
+        seen.add(key);
+        yield rec;
+      }
+    }
+
+    for (const rec of recordStore.values()) {
+      if (deletedIds.has(rec.id) || seen.has(rec.id)) continue;
+      if (!this.passesFilter(rec, filter)) continue;
+      seen.add(rec.id);
+      yield rec;
+    }
+
+    if (filter.includeMirrors && filter.query?.trim()) {
+      for (const ref of await this.buildMirrorRecords(filter.query)) {
+        if (deletedIds.has(ref.id) || seen.has(ref.id)) continue;
+        if (!this.passesFilter(ref, filter)) continue;
+        seen.add(ref.id);
+        yield ref;
+      }
+    }
+  }
+
+  private async buildMirrorRecords(query: string): Promise<MemoryRecord[]> {
+    const queryLower = query.toLowerCase();
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+    if (queryWords.length === 0) return [];
+
+    const refFiles: Array<{ path: string; level: MemoryLevel }> = [
+      { path: 'INDEX.md', level: 'L2' },
+      { path: 'MASTER_REFERENCE.md', level: 'L3' },
+      { path: 'CODING_STANDARDS.md', level: 'L3' },
+      { path: 'CYCLE_REGISTRY.md', level: 'L2' },
+    ];
+
+    const records: MemoryRecord[] = [];
+
+    for (const ref of refFiles) {
+      try {
+        const filePath = path.join(this.projectPath, ref.path);
+        const { promises: fsp } = await import('fs');
+        const content = await fsp.readFile(filePath, 'utf-8');
+        const sections = content.split(/^## /m).slice(1);
+
+        for (const section of sections) {
+          const sectionLower = section.toLowerCase();
+          const matchCount = queryWords.filter(w => sectionLower.includes(w)).length;
+          if (matchCount === 0) continue;
+
+          const title = section.split('\n')[0].trim();
+          const snippet = section.substring(0, 300).trim();
+          const id = `ref_${ref.path}_${title.substring(0, 20).replace(/\W/g, '_')}`;
+          if (deletedIds.has(id)) continue;
+
+          records.push({
+            id,
+            content: snippet,
+            level: ref.level,
+            source: 'documentation',
+            contextKeys: [ref.path, title],
+            confidence: MIRROR_MAX_CONFIDENCE,
+            accessCount: 0,
+            createdAt: new Date(),
+            metadata: {
+              type: 'reference_file',
+              source: ref.path,
+              provenance: 'mirror',
+              mirrorPath: ref.path,
+              tags: [ref.path],
+              importance: MIRROR_MAX_CONFIDENCE,
+            },
+          });
+        }
+      } catch {
+        // File missing — skip
+      }
+    }
+
+    return records;
   }
 
   /**
@@ -316,8 +511,8 @@ export class UnifiedMemoryCore {
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    // Wait for MemorySystem to finish loading files from disk
     await this.memorySystem.ensureLoaded();
+    await this.loadTombstones();
     this.initialized = true;
     log.debug('UnifiedMemoryCore initialized (memory loaded from disk)');
   }
@@ -378,7 +573,7 @@ export class UnifiedMemoryCore {
     // v3.10.1: Обновляем dependents у записей, от которых зависим
     if (record.dependencies?.length) {
       for (const depId of record.dependencies) {
-        const depRecord = recordStore.get(depId);
+        const depRecord = await this.resolveRecord(depId);
         if (depRecord) {
           depRecord.dependents = depRecord.dependents || [];
           if (!depRecord.dependents.includes(record.id)) {
@@ -391,7 +586,7 @@ export class UnifiedMemoryCore {
 
     // Sprint 4: explicit contradicts — downgrade both sides, no cascade
     for (const depId of getContradictDependencyIds(record)) {
-      const target = recordStore.get(depId);
+      const target = await this.resolveRecord(depId);
       if (target) {
         applyContradictPenalties(record, target);
         await this.persistRecord(target);
@@ -407,12 +602,21 @@ export class UnifiedMemoryCore {
   /**
    * Sprint 4: active explicit contradicts in memory graph
    */
-  getActiveConflicts(): MemoryConflictEntry[] {
-    return collectActiveConflicts(recordStore.values());
+  async getActiveConflicts(): Promise<MemoryConflictEntry[]> {
+    await this.initialize();
+    const records: MemoryRecord[] = [];
+    for await (const r of this.iterateRecords({})) {
+      records.push(r);
+    }
+    const byId = new Map(records.map(r => [r.id, r]));
+    return collectActiveConflicts(records, (id) => byId.get(id)?.confidence);
   }
 
-  /** Sync lookup for conflict reports (in-memory store only) */
+  /** Sync lookup: tombstone + in-memory store only (cold ids need async get()) */
   getRecordSync(id: string): MemoryRecord | null {
+    if (deletedIds.has(id)) {
+      return null;
+    }
     return recordStore.get(id) ?? null;
   }
 
@@ -440,7 +644,7 @@ export class UnifiedMemoryCore {
   }
 
   private async persistRecord(record: MemoryRecord): Promise<void> {
-    const storageLevel = this.mapLevelToStorage(record.level);
+    const storageLevel = this.durableStorageLevel(record);
     try {
       await this.memorySystem.store(
         record.id,
@@ -453,7 +657,7 @@ export class UnifiedMemoryCore {
   }
 
   private async persistRecordStrict(record: MemoryRecord): Promise<void> {
-    const storageLevel = this.mapLevelToStorage(record.level);
+    const storageLevel = this.durableStorageLevel(record);
     try {
       await this.memorySystem.store(
         record.id,
@@ -478,89 +682,6 @@ export class UnifiedMemoryCore {
       hash = hash & hash; // Convert to 32bit integer
     }
     return `hash_${Math.abs(hash).toString(16)}`;
-  }
-  
-  /**
-   * v3.10.1: Каскадная инвалидация зависимых записей
-   * 
-   * Когда запись обновляется, все записи которые от неё зависят
-   * помечаются как требующие перепроверки.
-   */
-  async invalidateDependents(recordId: string): Promise<string[]> {
-    await this.initialize();
-    
-    const invalidated: string[] = [];
-    const record = recordStore.get(recordId);
-    
-    if (!record?.dependents?.length) {
-      return invalidated;
-    }
-    
-    log.info(`Invalidating ${record.dependents.length} dependents of ${recordId}`);
-    
-    for (const dependentId of record.dependents) {
-      const dependent = recordStore.get(dependentId);
-      if (dependent) {
-        dependent.lastValidated = 0; // Требует перепроверки
-        dependent.confidence = Math.max(0.1, (dependent.confidence || 0.8) * 0.7); // Снижаем уверенность
-        invalidated.push(dependentId);
-        
-        // Рекурсивно инвалидируем зависимых от зависимых
-        const childInvalidated = await this.invalidateDependents(dependentId);
-        invalidated.push(...childInvalidated);
-      }
-    }
-    
-    log.info(`Total invalidated: ${invalidated.length} records`);
-    return invalidated;
-  }
-  
-  /**
-   * v3.10.1: Обновить запись и инвалидировать зависимые
-   */
-  async updateWithInvalidation(
-    id: string, 
-    content: string, 
-    options?: StoreOptions
-  ): Promise<{ record: MemoryRecord; invalidated: string[] }> {
-    await this.initialize();
-    
-    // Сначала инвалидируем зависимые
-    const invalidated = await this.invalidateDependents(id);
-    
-    // Получаем старую запись для сохранения dependents
-    const oldRecord = recordStore.get(id);
-    const existingDependents = oldRecord?.dependents || [];
-    
-    // Обновляем запись
-    const contentHash = this.computeContentHash(content);
-    const record: MemoryRecord = {
-      id,
-      content,
-      level: options?.level || oldRecord?.level || 'L0',
-      source: options?.source || oldRecord?.source || 'runtime',
-      contextKeys: options?.contextKeys || oldRecord?.contextKeys || [],
-      confidence: options?.confidence ?? oldRecord?.confidence ?? 0.8,
-      accessCount: (oldRecord?.accessCount || 0) + 1,
-      createdAt: oldRecord?.createdAt || new Date(),
-      lastAccessedAt: new Date(),
-      dependencies: options?.dependencies || oldRecord?.dependencies || [],
-      dependents: existingDependents,
-      contentHash,
-      lastValidated: Date.now(),
-      metadata: oldRecord?.metadata || {
-        type: options?.source || 'runtime',
-        source: options?.contextKeys?.[0] || '',
-        tags: options?.contextKeys || [],
-        importance: options?.confidence ?? 0.8,
-      },
-    };
-    
-    recordStore.set(id, record);
-    
-    log.info(`Updated record ${id}, invalidated ${invalidated.length} dependents`);
-    
-    return { record, invalidated };
   }
   
   /**
@@ -592,155 +713,45 @@ export class UnifiedMemoryCore {
    */
   async getStaleRecords(maxAge: number = 3600000): Promise<MemoryRecord[]> {
     await this.initialize();
-    
+
     const now = Date.now();
     const stale: MemoryRecord[] = [];
-    
-    for (const record of recordStore.values()) {
+
+    for await (const record of this.iterateRecords({})) {
       const lastValid = record.lastValidated || 0;
       if (now - lastValid > maxAge) {
         stale.push(record);
       }
     }
-    
+
     return stale.sort((a, b) => (a.lastValidated || 0) - (b.lastValidated || 0));
   }
 
   /**
-   * Каскадный поиск по всем уровням памяти
-   * v3.18: Инкрементирует accessCount найденных записей (enables promotion),
-   *        ищет также в reference files (bridge Markdown→JSON)
+   * Каскадный поиск — MEM-0: single path via iterateRecords
    */
   async cascadeSearch(query: string, options?: CascadeOptions): Promise<SearchResult[]> {
-    await this.initialize();
-    
+    const filter: RecordIterateFilter = {
+      levels: options?.levels,
+      minConfidence: options?.confidenceThreshold ?? options?.minConfidence ?? 0,
+      includeMirrors: Boolean(query?.trim()),
+      query,
+    };
+
     const results: SearchResult[] = [];
-    const limit = options?.maxResults || options?.limit || 10;
-    const minConf = options?.confidenceThreshold || options?.minConfidence || 0;
-    
-    // Search in in-memory records first
-    for (const record of recordStore.values()) {
-      if (options?.levels && !options.levels.includes(record.level)) continue;
-      const effectiveConf = this.applyConfidenceDecay(record);
-      if (effectiveConf < minConf) continue;
-      
+    for await (const record of this.iterateRecords(filter)) {
+      record.accessCount++;
+      record.lastAccessedAt = new Date();
       const score = this.calculateScore(query, record);
       if (score > 0.1 || query === '') {
-        // v3.18: Increment accessCount on search hit — enables promotion
-        record.accessCount++;
-        record.lastAccessedAt = new Date();
         results.push({ record, entry: record, score, level: record.level });
       }
     }
-    
-    // Also search in MemorySystem
-    try {
-      const msResults = await this.memorySystem.search(query, {
-        levels: options?.levels?.map(l => this.mapLevelToStorage(l)),
-        includeFogOfWar: true,
-        minConfidence: minConf
-      });
-      
-      for (const item of msResults) {
-        const record = this.convertToRecord(item);
-        if (record.confidence < minConf) continue;
-        if (!recordStore.has(record.id)) {
-          // Cache in recordStore so future searches update accessCount
-          recordStore.set(record.id, record);
-          record.accessCount++;
-          results.push({ record, entry: record, score: 0.5, level: record.level });
-        }
-      }
-    } catch (err) {
-      log.debug('MemorySystem search fallback:', err);
-    }
 
-    // v3.18: Search reference files (Markdown→JSON bridge)
-    if (query) {
-      try {
-        const refResults = await this.searchReferenceFiles(query, limit);
-        for (const ref of refResults) {
-          results.push(ref);
-        }
-      } catch (err) {
-        log.debug('Reference files search fallback:', err);
-      }
-    }
-
-    // v3.20: Trigger promotion check after search (accessCount may have changed)
-    await this.runPromotionCycle();
-
-    // Sort by score and limit
     results.sort((a, b) => b.score - a.score);
+    const limit = options?.maxResults ?? options?.limit ?? 10;
+    await this.runPromotionCycle();
     return results.slice(0, limit);
-  }
-
-  /**
-   * v3.18: Search through reference Markdown files
-   * Bridge: Markdown world → JSON search results
-   */
-  private async searchReferenceFiles(query: string, limit: number): Promise<SearchResult[]> {
-    const results: SearchResult[] = [];
-    const queryLower = query.toLowerCase();
-    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
-    if (queryWords.length === 0) return results;
-
-    const refFiles: Array<{ path: string; level: MemoryLevel }> = [
-      { path: 'INDEX.md', level: 'L2' },
-      { path: 'MASTER_REFERENCE.md', level: 'L3' },
-      { path: 'CODING_STANDARDS.md', level: 'L3' },
-      { path: 'CYCLE_REGISTRY.md', level: 'L2' },
-    ];
-
-    for (const ref of refFiles) {
-      try {
-        const filePath = `${this.projectPath}/${ref.path}`;
-        const { promises: fsp } = await import('fs');
-        const content = await fsp.readFile(filePath, 'utf-8');
-        
-        // Split into sections (## headings)
-        const sections = content.split(/^## /m).slice(1);
-        
-        for (const section of sections) {
-          const sectionLower = section.toLowerCase();
-          const matchCount = queryWords.filter(w => sectionLower.includes(w)).length;
-          
-          if (matchCount === 0) continue;
-          
-          const score = 0.4 * (matchCount / queryWords.length);
-          const title = section.split('\n')[0].trim();
-          const snippet = section.substring(0, 300).trim();
-          
-          const syntheticRecord: MemoryRecord = {
-            id: `ref_${ref.path}_${title.substring(0, 20).replace(/\W/g, '_')}`,
-            content: snippet,
-            level: ref.level,
-            source: 'documentation',
-            contextKeys: [ref.path, title],
-            confidence: 0.9,
-            accessCount: 0,
-            createdAt: new Date(),
-            metadata: {
-              type: 'reference_file',
-              source: ref.path,
-              tags: [ref.path],
-              importance: 0.9,
-            },
-          };
-          
-          results.push({
-            record: syntheticRecord,
-            entry: syntheticRecord,
-            score,
-            level: ref.level,
-          });
-        }
-      } catch {
-        // File doesn't exist — skip
-      }
-    }
-
-    return results.sort((a, b) => b.score - a.score).slice(0, Math.min(3, limit));
   }
 
   /**
@@ -758,38 +769,7 @@ export class UnifiedMemoryCore {
    * Получить запись по ID
    */
   async get(id: string): Promise<MemoryRecord | null> {
-    await this.initialize();
-    
-    // Check if deleted
-    if (deletedIds.has(id)) {
-      return null;
-    }
-    
-    // Check in-memory store first
-    const record = recordStore.get(id);
-    if (record !== undefined) {
-      record.accessCount++;
-      record.lastAccessedAt = new Date();
-      return record;
-    }
-    
-    // Try to find in MemorySystem (skip 'project' level as it returns entire project data)
-    try {
-      for (const level of ['surface', 'working', 'longterm', 'conceptual'] as const) {
-        const data = await this.memorySystem.retrieve(id, level);
-        // Ensure data is an actual record (has content property), not just any truthy value
-        if (data !== null && data !== undefined && typeof data === 'object' && data.content !== undefined) {
-          const converted = this.convertToRecord({ key: id, data, level });
-          // Cache it in recordStore for future access
-          recordStore.set(id, converted);
-          return converted;
-        }
-      }
-    } catch (err) {
-      log.debug('MemorySystem retrieve fallback:', err);
-    }
-    
-    return null;
+    return this.resolveRecord(id, { touchAccess: true });
   }
 
   /**
@@ -806,7 +786,7 @@ export class UnifiedMemoryCore {
       return { ok: false, reason: 'not_found' };
     }
 
-    const storageLevel = this.mapLevelToStorage(existing.level);
+    const storageLevel = this.durableStorageLevel(existing);
     if (!DURABLE_MEMORY_STORAGE.has(storageLevel)) {
       return {
         ok: false,
@@ -841,20 +821,18 @@ export class UnifiedMemoryCore {
    */
   async delete(id: string): Promise<boolean> {
     await this.initialize();
-    
-    recordStore.delete(id);
-    deletedIds.add(id);
-    
+
     let deletedFromDisk = false;
-    for (const level of ['surface', 'working', 'longterm', 'conceptual'] as const) {
-      const result = await this.memorySystem.delete(id, level);
-      if (result) {
+    for (const level of UnifiedMemoryCore.KEYED_STORAGE_LEVELS) {
+      if (await this.memorySystem.delete(id, level)) {
         deletedFromDisk = true;
-        break;
       }
     }
-    
-    return deletedFromDisk;
+
+    recordStore.delete(id);
+    deletedIds.add(id);
+    await this.persistTombstones();
+    return deletedFromDisk || true;
   }
 
   /**
@@ -915,14 +893,25 @@ export class UnifiedMemoryCore {
     
     // 1. Count from MemorySystem (source of truth) first
     try {
-      for (const level of ['surface', 'working', 'longterm', 'conceptual'] as const) {
+      for (const level of UnifiedMemoryCore.KEYED_STORAGE_LEVELS) {
         const keys = await this.memorySystem.list(level);
-        const mappedLevel = this.mapStorageToLevel(level);
         for (const key of keys) {
           if (deletedIds.has(key)) continue;
           if (seenIds.has(key)) continue;
           seenIds.add(key);
-          levelCounts[mappedLevel]++;
+          let memLevel = this.mapStorageToLevel(level);
+          try {
+            const data = await this.memorySystem.retrieve(key, level);
+            if (data?.level && typeof data.level === 'string') {
+              const fromPayload = data.level as MemoryLevel;
+              if (['L0', 'L1', 'L2', 'L3', 'L4'].includes(fromPayload)) {
+                memLevel = fromPayload;
+              }
+            }
+          } catch {
+            /* use bucket default */
+          }
+          levelCounts[memLevel]++;
         }
       }
     } catch (err) {
@@ -1321,10 +1310,16 @@ export class UnifiedMemoryCore {
       const d = new Date(data.invalidatedAt);
       invalidatedAt = Number.isNaN(d.getTime()) ? undefined : d;
     }
+    const payloadLevel = data.level as string | undefined;
+    const level: MemoryLevel =
+      payloadLevel != null
+      && (['L0', 'L1', 'L2', 'L3', 'L4'] as MemoryLevel[]).includes(payloadLevel as MemoryLevel)
+        ? (payloadLevel as MemoryLevel)
+        : this.mapStorageToLevel(item.level || item._level || 'surface');
     return {
       id: item._key || item.key || item.id || generateId(),
       content: data.content || JSON.stringify(data),
-      level: this.mapStorageToLevel(item.level || data.level || 'surface'),
+      level,
       source: (data.source || 'runtime') as SourceType,
       contextKeys: data.contextKeys || [],
       confidence: data.confidence ?? 0.5,
@@ -1351,6 +1346,7 @@ export class UnifiedMemoryCore {
   /** MEM-3: flush debounced memory writes on shutdown */
   async shutdown(): Promise<void> {
     await this.memorySystem.shutdown();
+    await this.tombstoneWrites;
   }
 }
 
@@ -1360,14 +1356,27 @@ export class UnifiedMemoryCore {
 
 let memoryCore: UnifiedMemoryCore | null = null;
 let memoryCoreProjectPath: string | null = null;
+/** MEM-7: cores replaced by a project switch that are still writing their last changes */
+const retiringCores = new Set<Promise<void>>();
 
-// v3.19: Auto-reset singleton when workspace changes (MCP roots/list_changed)
-onProjectPathChange((_oldPath, _newPath) => {
-  log.info(`Workspace changed, resetting MemoryCore singleton`);
+function retireMemoryCore(): void {
+  const previous = memoryCore;
   memoryCore = null;
   memoryCoreProjectPath = null;
   recordStore.clear();
   deletedIds.clear();
+  if (!previous) return;
+  const drain: Promise<void> = previous
+    .shutdown()
+    .catch(err => log.warn('Flush of the previous project memory failed:', err))
+    .finally(() => retiringCores.delete(drain));
+  retiringCores.add(drain);
+}
+
+// v3.19: Auto-reset singleton when workspace changes (MCP roots/list_changed)
+onProjectPathChange((_oldPath, _newPath) => {
+  log.info(`Workspace changed, resetting MemoryCore singleton`);
+  retireMemoryCore();
 });
 
 /**
@@ -1379,10 +1388,7 @@ export async function getMemoryCore(projectPath?: string): Promise<UnifiedMemory
   
   if (memoryCoreProjectPath && resolvedPath !== memoryCoreProjectPath) {
     log.info(`Project path changed (${memoryCoreProjectPath} → ${resolvedPath}), resetting MemoryCore`);
-    memoryCore = null;
-    memoryCoreProjectPath = null;
-    recordStore.clear();
-    deletedIds.clear();
+    retireMemoryCore();
   }
   
   if (!memoryCore) {
@@ -1397,10 +1403,7 @@ export async function getMemoryCore(projectPath?: string): Promise<UnifiedMemory
  * MEM-3: Flush pending writes for the active memory core without creating a new instance.
  */
 export async function shutdownMemoryCore(): Promise<void> {
-  if (!memoryCore) {
-    return;
-  }
-  await memoryCore.shutdown();
+  await Promise.all([memoryCore?.shutdown(), ...retiringCores]);
 }
 
 /**
@@ -1411,101 +1414,4 @@ export function resetMemoryCore(): void {
   memoryCoreProjectPath = null;
   recordStore.clear();
   deletedIds.clear();
-}
-
-// ============================================================================
-// Legacy Compatibility Layer
-// Provides PersistentMemory-like interface for backward compatibility
-// ============================================================================
-
-/**
- * Index Report - result of directory indexing
- */
-export interface IndexReport {
-  indexed: number;
-  skipped: number;
-  errors: string[];
-  duration: number;
-  totalTokens: number;
-}
-
-/**
- * PersistentMemory compatibility wrapper
- * Provides the same interface as the old PersistentMemory but uses UnifiedMemoryCore
- */
-export class PersistentMemory {
-  private core: UnifiedMemoryCore;
-  private projectId: string;
-
-  constructor(config: {
-    openaiApiKey?: string;
-    defaultProjectId?: string;
-    chromaUrl?: string;
-    collectionName?: string;
-    embeddingModel?: string;
-  }) {
-    this.projectId = config.defaultProjectId || 'default';
-    this.core = new UnifiedMemoryCore();
-  }
-
-  async initialize(): Promise<void> {
-    await this.core.initialize();
-  }
-
-  async add(content: string, metadata?: any): Promise<{ id: string }> {
-    const record = await this.core.store(content, {
-      level: 'L1',
-      source: metadata?.type || 'runtime',
-      contextKeys: metadata?.tags || [],
-      confidence: metadata?.importance || 0.7,
-    });
-    return { id: record.id };
-  }
-
-  async addBatch(entries: Array<{ content: string; metadata?: any }>): Promise<void> {
-    for (const entry of entries) {
-      await this.add(entry.content, entry.metadata);
-    }
-  }
-
-  async search(params: { query: string; limit?: number; threshold?: number }): Promise<SearchResult[]> {
-    const results = await this.core.cascadeSearch(params.query, { 
-      limit: params.limit || 10,
-      minConfidence: params.threshold,
-    });
-    return results;
-  }
-
-  async deleteBySource(source: string): Promise<number> {
-    // Find and delete records with this source in contextKeys
-    let count = 0;
-    for (const record of recordStore.values()) {
-      if (record.contextKeys.includes(source)) {
-        recordStore.delete(record.id);
-        count++;
-      }
-    }
-    return count;
-  }
-
-  async indexDirectory(dirPath: string): Promise<IndexReport> {
-    // Simplified indexing - just return a report
-    return {
-      indexed: 0,
-      skipped: 0,
-      errors: [],
-      duration: 0,
-      totalTokens: 0,
-    };
-  }
-}
-
-/**
- * Create PersistentMemory instance (compatibility function)
- */
-export function createPersistentMemory(collectionName: string): PersistentMemory {
-  return new PersistentMemory({
-    defaultProjectId: collectionName,
-    collectionName,
-  });
 }

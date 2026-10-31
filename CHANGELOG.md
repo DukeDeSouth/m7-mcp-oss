@@ -13,12 +13,83 @@ unfinished experimental module, and telemetry upload is now opt-in (no default
 endpoint; set `M7_TELEMETRY_ENDPOINT` to use your own collector). Entries below
 that mention those pieces describe history, not what ships here.
 
-## [3.18.1] - 2026-10-29
+## [Unreleased]
 
-Stage 1 community fix sprint (batch 1) — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+## [3.22.2] - 2026-10-30
 
 ### Fixed
-- CYC-1, STATE-1, STATE-2, MEM-3 (details in entries below under prior Unreleased)
+- **HYG-11:** `require()` in three ES modules threw `ReferenceError` (the package is `"type": "module"`) and the surrounding `catch` hid it: joining the mesh never wrote the presence file, the knowledge-graph cache was never read, and `createTSISystem()` threw. Replaced with static imports; the acceptance suite scans the TypeScript AST of `src/` for `require(...)` calls.
+- **Windows:** every atomic write failed with `EPERM, fsync`, because the temp file was reopened read-only before `sync()`; it is opened `r+` now (#7). The Cursor project slug was decoded with POSIX separators only, so on Windows the project path fell back to cwd; the drive root and both separators are handled (#8). Thanks to @conradipui-glitch (#9).
+
+### Tests
+- **MEM-7:** The ordering test holds the first file write and counts concurrent writes instead of waiting 2.5 s, so the "no write queue" mutant is killed on every run (it survived some runs before).
+
+## [3.22.1] - 2026-10-30
+
+Found by the deep scan acceptance suites (`tests/deepScanAcceptance.test.mjs`, `tests/deepScanE2E.test.mjs`, `tests/deepScanTraceability.test.mjs`) — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md) (batch 6).
+
+### Security
+- **HYG-7:** Architecture context search (`mcp_m7_analyze_task`) ran backticked task text through a shell (`exec('rg "<kw>" …')`); a `"` in the keyword executed the rest as commands when `rg` was not on `PATH`. Now `execFile('rg', argv)` with `--fixed-strings -e <kw> -- .`; with `rg` present the search no longer blocks on stdin until the 2 s timeout, so it actually returns results.
+
+### Fixed
+- **STATE-3:** Task sessions created less than 500 ms before exit were lost (debounced write not drained on shutdown); a debounced write after a project switch went to the new project; the first tool call after start could report a persisted session as "not found". `TaskOrchestrator.flushPersist()` is a shutdown contributor, the sessions file path is fixed at construction, and tool/resource entry points await `ready()`.
+- **STATE-4:** Cross-session knowledge was stored in `<cwd>/.m7/cross-session/` instead of the active project, with one process-wide instance pinned to the first project and save errors logged at debug level only. Storage now follows `getProjectPath()`, `getCrossSessionLearning()` keeps one instance per project, and save failures log at warn. Arch advisor, visualizer, mesh, telemetry exporters, hook telemetry, retro classifier and git capture also use the active project instead of cwd; git capture runs `git` via `execFileSync` with an argument list.
+- **GRAPH-3:** Transfer rollback restores the whole source node (`restoreTask`), not only `status`; `outcome` and `completed` no longer survive a failed transfer.
+- **CYC-2:** A client retry of an accepted reflection is replayed by content hash instead of being accepted as the next phase's artifact.
+- **HYG-1:** `generateSlug` keeps letters of any script and falls back to a hash, so CJK/emoji/punctuation-only cycles no longer write artifacts into the `m7-cycles/` root.
+- **HYG-3:** `grep` argv passes the keyword after `-e` and ends options with `--`.
+- **HYG-4:** `mcp_m7_hive_coordinator` debug block (also saved into the hive report file), its debug log, and the `M7_DEBUG` startup log show key presence only, not a prefix.
+- **HYG-8:** `serverInfo.version` and `m7://status` report the package version (`PACKAGE_VERSION`) instead of `2.0.0`.
+- **HYG-9:** `mcp_m7_analyze_task` no longer runs `docker compose up -d` on a compose file from the server's working directory when ChromaDB is offline (and no longer waits up to 15 s for it). The offline hint names `CHROMA_URL` and the local JSON fallback.
+- **HYG-10:** Removed unreachable code that repeated already-fixed defects: `src/core/verification/` (`execSync` with interpolated `grep`), the unregistered auto-memory tool with its `memory/auto` modules and the `PersistentMemory` wrapper (`importance || 0.7`, RAM-only `deleteBySource`), and `invalidateDependents` / `updateWithInvalidation` (RAM only, confidence 0 → 0.56). `projectScanner` git info uses `execFile` and no longer loses branch and last commit in repos without an `origin` remote.
+- **CYC-10:** Cycles with the same description shared one artifact folder: the second cycle's INTAKE was appended to the first one's as a resubmission and its registry row replaced the first one's. Artifact folders are now `m7-cycles/<slug>-<id suffix>/`; a start reserves the ID and creates the folder exclusively, tries another suffix when either is taken, and fails rather than share. Cycles created earlier keep their folders. Old-cycle cleanup runs in the project of the cycle being started.
+- **STATE-5:** `mcp_m7_contracts` answered "registered successfully" when nothing was saved, and `list` returned nothing even right after a registration. Each call read the registry before its load finished, only functions were loaded, IDs changed on every load, and a failed write was swallowed. The handler now awaits the load, all four sections are read with their IDs and dates, registrations are serialized, and a failed write returns `success: false` naming `PROJECT_SCHEMA.yaml` and `mcp_m7_init_project`.
+- **MEM-5:** Long-term memory past 2000 records, conceptual past 1000, fog of war past 500 entries and tombstones past 5000 lost their oldest entries on disk, because the bounded working map was written whole. Persisted collections are no longer bounded; L0/L1 (RAM only) keep their limits.
+- **MEM-6:** Every `analyze_task` (and every other schema read) stored another full copy of `PROJECT_SCHEMA.yaml` in long-term memory at confidence 1.0. Reading the schema no longer writes anything. Copies from earlier versions are not removed; see KNOWN_ISSUES MEM-6.
+- **MEM-7:** From 50 pending writes on, memory flushes ran concurrently and unawaited, so an older snapshot could be written last and `shutdown()` returned while writes were still in flight (120 stores then exit → 50 on disk). All writes of one memory instance now go through one queue, `shutdown()` waits for it, a core replaced by a project switch is drained before exit, and tombstone writes are queued the same way.
+
+### Changed
+- KNOWN_ISSUES has a "Review findings" table mapping every numbered finding of the October 2026 review to its items; the traceability test checks it. The "Not on this list" entry about cycle-ID collisions was wrong (see CYC-10) and is gone.
+- README: new "What is stored and for how long" section; the grounding gate's scope is listed under known limitations; the note about tests writing into `.m7/` in the repo is replaced by the isolation rule.
+- `npm run build` removes `dist/` first (`prebuild`), so deleted sources no longer leave stale modules behind (`dist/test-tool.js`, `dist/core/enforcement/codeInterceptor.js` were still present).
+- `scripts/run-tests.sh` runs every `tests/*.test.mjs` and `tests/reliability/*.test.mjs` and fails if a test run leaves files in the repository.
+- README: escaped backticks around `mcp_m7_cycle` rendered literally (HYG-5 wording).
+
+## [3.22.0] - 2026-10-30
+
+### Fixed
+- **GATE-3:** Reflection gate template rendered once in `formatCycleResponse`; removed duplicate embed in instruction/artifact template; dropped misleading cumulative error banner in hints.
+- **HYG-3:** Hive file search uses `execFile('grep', argv[])` instead of shell string interpolation.
+- **HYG-4:** Removed `mcp_m7_test_tool` (API key prefix leak).
+- **HYG-6:** Removed unused `M7CodeInterceptor` dead code.
+
+### Changed
+- **HYG-5:** README clarifies rule re-injection counts `mcp_m7_cycle` calls only (MCP-visible tools).
+
+## [3.21.1] - 2026-10-30
+
+### Fixed
+- **CYC-8:** `registerSummary` replaces an existing registry row for the same cycle folder instead of appending duplicates; summary includes `[status]`.
+- **HYG-1:** `generateTaskId` uses SHA-1 slug fallback for non-Latin descriptions and `randomBytes(3)` suffix (KNOWN_ISSUES HYG-1).
+
+## [3.21.0] - 2026-10-30
+
+### Fixed
+- **GATE-2:** Irreversible grounding steps with empty `premise_ids` emit one **strong** warning (KNOWN_ISSUES GATE-2).
+- **GRAPH-1:** Depth-limited subgraph traversal re-expands nodes when reached with greater remaining depth (`bestDepth` map).
+- **GRAPH-2:** Transfer task IDs use random suffix; `createTask` refuses duplicate IDs.
+- **GRAPH-3:** Failed transfer rolls back new task and restores source status (`deleteTask`).
+- **HYG-2:** Hive task result cache keys preserve word order and Unicode letters (`hashTask`).
+
+## [3.20.1] - 2026-10-30
+
+### Fixed
+- **GATE-1:** Grounding `path:` premise refs verify filesystem under project root (with traversal guard); Fog of War enriches when present (KNOWN_ISSUES GATE-1).
+
+## [3.20.0] - 2026-10-30
+
+### Fixed
+- **MEM-0:** Unified memory read path — `resolveRecord` / `iterateRecords`, persisted tombstones (`.m7/memory-tombstones.json`), mirror provenance with capped confidence, L4 records durably stored keyed in longterm; `getActiveConflicts()` async (KNOWN_ISSUES MEM-0a–d).
 
 ## [3.19.0] - 2026-10-30
 
@@ -38,7 +109,12 @@ Stage 1 remainder + Stage 2 cycle protocol — see [docs/COMMUNITY_SPRINT.md](do
 ### Changed
 - CYC-5: Separate `shortArtifactAttempts` and `rewindCount`; third consecutive short artifact returns phase-stuck instead of force-accepting (KNOWN_ISSUES CYC-5). **Breaking:** clients that relied on a third short submit to advance must submit a valid artifact or abort.
 
-## [Unreleased]
+## [3.18.1] - 2026-10-29
+
+Stage 1 community fix sprint (batch 1) — see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+
+### Fixed
+- CYC-1, STATE-1, STATE-2, MEM-3 (details in entries below under prior Unreleased)
 
 ## [Unreleased — prior epistemic work]
 

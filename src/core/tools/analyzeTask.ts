@@ -226,16 +226,13 @@ export const analyzeTaskTool = {
       log.debug(`M7 v3.1] Context provider error: ${e.message}`);
     }
 
-    // v3.3 System Health Check (with Docker auto-start)
+    // v3.3 System Health Check
     let healthStatus = '';
     try {
-      const health = await checkSystemHealth({ autoStartDocker: true });
+      const health = await checkSystemHealth();
       healthStatus = formatHealthStatus(health);
       if (health.overallStatus !== 'healthy') {
         log.debug(`M7 v3.3] System health: ${health.overallStatus} (${health.components.filter(c => c.status !== 'online').map(c => c.name).join(', ')})`);
-      }
-      if (health.dockerStartAttempted) {
-        log.debug(`M7 v3.3] Docker auto-start attempted: ${health.dockerStartSuccess ? 'SUCCESS' : 'FAILED'}`);
       }
     } catch (e: any) {
       log.debug(`M7 v3.3] Health check error: ${e.message}`);
@@ -483,6 +480,7 @@ Please verify all libraries before proceeding with task analysis.`
       
       if (create_session && orchestrator && analysis.route !== 'decompose') {
         // Check for existing sessions first
+        await orchestrator.ready();
         const existingSessions = orchestrator.getAllActiveSessions();
         
         if (reuse_session && existingSessions.length > 0) {

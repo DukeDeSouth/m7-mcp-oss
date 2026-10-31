@@ -9,12 +9,9 @@ const log = createLogger('[Telemetry]');
 import { createHash, randomUUID } from 'crypto';
 import { hostname, platform, arch, cpus } from 'os';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { PACKAGE_VERSION } from '../core/utils/packageVersion.js';
 import {
   TelemetryEvent,
   TelemetryEventType,
@@ -75,20 +72,6 @@ export function classifyToolEvent(toolName: string): TelemetryEventType {
 const M7_DIR = join(homedir(), '.m7');
 const CONFIG_FILE = join(M7_DIR, 'telemetry_config.json');
 
-// Get package version
-function getM7Version(): string {
-  try {
-    const packagePath = join(__dirname, '..', '..', 'package.json');
-    if (existsSync(packagePath)) {
-      const pkg = JSON.parse(readFileSync(packagePath, 'utf-8'));
-      return pkg.version || '0.0.0';
-    }
-  } catch {
-    // Ignore
-  }
-  return '0.0.0';
-}
-
 export class TelemetryCollector {
   private buffer: TelemetryEvent[] = [];
   private config: TelemetryConfig;
@@ -119,7 +102,7 @@ export class TelemetryCollector {
   constructor(config: Partial<TelemetryConfig> = {}) {
     this.config = { ...DEFAULT_TELEMETRY_CONFIG, ...config };
     this.deviceHash = this.generateDeviceHash();
-    this.m7Version = getM7Version();
+    this.m7Version = PACKAGE_VERSION;
     this.consent = this.loadConsent();
     
     // Ensure M7 directory exists

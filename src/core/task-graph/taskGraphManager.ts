@@ -124,6 +124,10 @@ export class TaskGraphManager {
    */
   async createTask(options: CreateTaskOptions): Promise<TaskNode> {
     await this.ensureInitialized();
+
+    if (this.graph!.nodes[options.id]) {
+      throw new Error(`Task id already exists: ${options.id}`);
+    }
     
     const node: TaskNode = {
       id: options.id,
@@ -293,13 +297,16 @@ export class TaskGraphManager {
     const startTime = Date.now();
     await this.ensureInitialized();
     
-    const visited = new Set<string>();
+    const bestDepth = new Map<string, number>();
     const tasks: TaskNode[] = [];
     const links: TaskLink[] = [];
+    const includedTasks = new Set<string>();
     
     const traverse = (nodeId: string, depth: number) => {
-      if (depth < 0 || visited.has(nodeId)) return;
-      visited.add(nodeId);
+      if (depth < 0) return;
+      const seenAt = bestDepth.get(nodeId);
+      if (seenAt !== undefined && depth <= seenAt) return;
+      bestDepth.set(nodeId, depth);
       
       const node = this.graph!.nodes[nodeId];
       if (!node) return;
@@ -310,7 +317,10 @@ export class TaskGraphManager {
         return;
       }
       
-      tasks.push(node);
+      if (!includedTasks.has(nodeId)) {
+        includedTasks.add(nodeId);
+        tasks.push(node);
+      }
       
       // Обходим связи
       const nodeLinks = this.graph!.links.filter(l => 
@@ -346,6 +356,35 @@ export class TaskGraphManager {
    */
   async getActiveTasks(): Promise<TaskNode[]> {
     return this.findByStatus('active');
+  }
+  
+  /**
+   * Удаляет задачу и все связи с ней (rollback transfer / cleanup).
+   */
+  async deleteTask(taskId: string): Promise<void> {
+    await this.ensureInitialized();
+    if (!this.graph!.nodes[taskId]) {
+      return;
+    }
+    delete this.graph!.nodes[taskId];
+    this.graph!.links = this.graph!.links.filter(
+      l => l.from !== taskId && l.to !== taskId,
+    );
+    await this.save();
+    log.debug(`Task deleted: ${taskId}`);
+  }
+
+  /**
+   * Replaces a node with a previously captured snapshot (rollback of a failed multi-step change).
+   */
+  async restoreTask(snapshot: TaskNode): Promise<void> {
+    await this.ensureInitialized();
+    if (!this.graph!.nodes[snapshot.id]) {
+      throw new Error(`Task not found: ${snapshot.id}`);
+    }
+    this.graph!.nodes[snapshot.id] = structuredClone(snapshot);
+    await this.save();
+    log.debug(`Task restored: ${snapshot.id}`);
   }
   
   /**
@@ -422,4 +461,9 @@ export function getTaskGraphManager(projectPath?: string): TaskGraphManager {
     managerInstance = new TaskGraphManager(projectPath);
   }
   return managerInstance;
+}
+
+/** @internal test hook */
+export function resetTaskGraphManagerForTests(): void {
+  managerInstance = null;
 }

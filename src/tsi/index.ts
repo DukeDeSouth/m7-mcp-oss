@@ -31,8 +31,7 @@ export { validateImplementationTool } from './tools/validateImplementation.js';
 
 // Утилиты для создания TSI системы
 export function createTSISystem(config?: any): any {
-  const { TSISystem } = require('./tsiSystem.js');
-  return new TSISystem(config);
+  return new TSISystemClass(config);
 }
 
 // Версия TSI

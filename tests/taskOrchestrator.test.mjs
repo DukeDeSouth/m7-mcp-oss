@@ -3,10 +3,17 @@
  * Run via: npm test (imports from dist/)
  */
 
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { bindProject, makeProject, removeProject } from './helpers/deepScanHarness.mjs';
 
-process.env.CURSOR_WORKSPACE = process.env.CURSOR_WORKSPACE || new URL('..', import.meta.url).pathname;
+// Sessions and cross-session knowledge are written to the bound project.
+const PROJECT = await makeProject('task-orchestrator-');
+const unbind = await bindProject(PROJECT);
+after(async () => {
+  unbind();
+  await removeProject(PROJECT);
+});
 
 const { TaskOrchestrator } = await import('../dist/core/orchestrator/taskOrchestrator.js');
 

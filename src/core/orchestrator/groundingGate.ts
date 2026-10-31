@@ -1,4 +1,6 @@
 import type { FogOfWarEntry } from '../../memory/memorySystem.js';
+import path from 'path';
+import { getProjectPath } from '../utils/projectPath.js';
 import { CONTROL_CHANNEL_GROUNDING_BULLET } from './controlChannel.js';
 import {
   getEpistemicStatus,
@@ -57,6 +59,57 @@ export interface GroundingCheckResult {
 }
 
 const PASS_STATUSES: ReadonlySet<EpistemicStatus> = new Set(['KNOWN', 'HUMAN_CONFIRMED']);
+
+const FILESYSTEM_PREMISE_CONFIDENCE = 0.8;
+
+function resolveSafeProjectPath(projectRoot: string, relativePath: string): string | null {
+  const trimmed = relativePath.replace(/^\/+/, '').trim();
+  if (!trimmed) {
+    return null;
+  }
+  const absolute = path.resolve(projectRoot, trimmed);
+  const rel = path.relative(projectRoot, absolute);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return null;
+  }
+  return absolute;
+}
+
+function buildFilesystemPremiseRecord(relPath: string): MemoryRecord {
+  return {
+    id: `path_${relPath.replace(/\W/g, '_')}`,
+    content: `File exists: ${relPath}`,
+    level: 'L1',
+    source: 'documentation',
+    contextKeys: [relPath],
+    confidence: FILESYSTEM_PREMISE_CONFIDENCE,
+    accessCount: 0,
+    createdAt: new Date(),
+    lastValidated: Date.now(),
+    metadata: {
+      type: 'reference_file',
+      source: relPath,
+      provenance: 'filesystem',
+      tags: [relPath],
+      importance: FILESYSTEM_PREMISE_CONFIDENCE,
+    },
+  };
+}
+
+function mergeFogOntoFilesystemRecord(
+  base: MemoryRecord,
+  fog: FogOfWarEntry
+): MemoryRecord {
+  const fogRec = fogEntryToMemoryRecord(fog);
+  return {
+    ...fogRec,
+    metadata: {
+      ...fogRec.metadata,
+      provenance: 'filesystem',
+    },
+    confidence: Math.max(base.confidence, fogRec.confidence),
+  };
+}
 
 export function warningSeverity(
   status: EpistemicStatus | 'NOT_FOUND',
@@ -152,11 +205,26 @@ export async function resolvePremiseRef(ref: string): Promise<MemoryRecord | nul
 
   let lookupRef = ref;
   if (ref.startsWith('path:')) {
-    lookupRef = ref.slice(5);
+    lookupRef = ref.slice(5).trim();
+    const projectRoot = getProjectPath();
+    const absolute = resolveSafeProjectPath(projectRoot, lookupRef);
+    if (!absolute) {
+      return null;
+    }
+    const { access } = await import('fs/promises');
+    try {
+      await access(absolute);
+    } catch {
+      return null;
+    }
+
+    let record = buildFilesystemPremiseRecord(lookupRef);
     const entries = await memCore.getFogOfWar({ path: lookupRef, includeInvalidated: false });
-    const exact = entries.find(e => e.path === lookupRef);
-    const entry = exact ?? entries[0];
-    return entry ? fogEntryToMemoryRecord(entry) : null;
+    const fog = entries.find(e => e.path === lookupRef) ?? entries[0];
+    if (fog) {
+      record = mergeFogOntoFilesystemRecord(record, fog);
+    }
+    return record;
   }
 
   if (ref.startsWith('fow_')) {
@@ -227,6 +295,25 @@ export async function runGroundingCheck(
   const seen = new Set<string>();
 
   for (const step of steps) {
+    if (
+      step.reversibility === 'irreversible'
+      && step.premise_ids.length === 0
+    ) {
+      const key = `irreversible-no-premises:${step.id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        warnings.push({
+          premiseId: '-',
+          ref: '-',
+          status: 'NOT_FOUND',
+          severity: 'strong',
+          stepIds: [step.id],
+          message: `Irreversible step "${step.id}" declares no premise_ids — grounding cannot be verified.`,
+        });
+      }
+      continue;
+    }
+
     for (const premiseId of step.premise_ids) {
       const premise = premiseById.get(premiseId);
       if (!premise) {

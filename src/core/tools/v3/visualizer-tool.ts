@@ -10,6 +10,7 @@ import {
   VisualizerServer 
 } from '../../../visualizer/index.js';
 import { getKnowledgeGraph } from '../../../knowledge-graph/index.js';
+import { getProjectPath } from '../../utils/projectPath.js';
 
 // ============================================
 // SCHEMA
@@ -161,7 +162,7 @@ WebSocket: ws://localhost:3847`;
   // Ensure Knowledge Graph is built
   const graph = getKnowledgeGraph();
   if (!graph.built) {
-    await graph.build({ rootPath: process.cwd() });
+    await graph.build({ rootPath: getProjectPath() });
   }
   
   const { httpPort, wsPort } = await server.start();

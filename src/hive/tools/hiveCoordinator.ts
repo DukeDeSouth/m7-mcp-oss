@@ -196,7 +196,7 @@ ${enrichedContext.relevantChunks.slice(0, 3).map(chunk =>
         const anthropicKey = process.env.ANTHROPIC_API_KEY || '';
         
         log.debug(`🔑 [MCP Hive] OpenAI key: ${openaiKey ? 'present' : 'MISSING'}`);
-        log.debug(`🔑 [MCP Hive] Anthropic key: ${anthropicKey ? 'present (' + anthropicKey.substring(0, 15) + '...)' : 'MISSING'}`);
+        log.debug(`🔑 [MCP Hive] Anthropic key: ${anthropicKey ? 'present' : 'MISSING'}`);
         
         if (!anthropicKey) {
           log.debug('⚠️ [MCP Hive] ANTHROPIC_API_KEY not set, Architect will use fallback');
@@ -228,7 +228,7 @@ ${enrichedContext.relevantChunks.slice(0, 3).map(chunk =>
 ## 🔧 Debug Info
 
 - OpenAI Key: ${openaiKey ? '✅ Present' : '❌ MISSING'}
-- Anthropic Key: ${anthropicKey ? '✅ Present (' + anthropicKey.substring(0, 15) + '...)' : '❌ MISSING'}
+- Anthropic Key: ${anthropicKey ? '✅ Present' : '❌ MISSING'}
 - Architect Latency: ${result.metrics.architectLatencyMs}ms
 - Team Size: ${result.team.length}
 - Is Fallback: ${result.team.some(a => a.role === 'Strategic Analyst') ? 'YES (fallback team)' : 'NO (dynamic team)'}

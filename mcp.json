@@ -1,6 +1,6 @@
 {
   "name": "m7-mcp-server",
-  "version": "3.19.0",
+  "version": "3.22.2",
   "description": "M7 MCP Server - methodology-enforcing MCP server for AI coding agents",
   "main": "dist/index.js",
   "tools": [
@@ -20,7 +20,6 @@
     "mcp_m7_console",
     "mcp_m7_contracts",
     "mcp_m7_impact",
-    "mcp_m7_test_tool",
     "mcp_m7_hive_coordinator",
     "mcp_m7_knowledge_hub",
     "mcp_m7_safety_verify",

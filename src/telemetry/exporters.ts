@@ -12,16 +12,17 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { createLogger } from '../core/utils/logger.js';
+import { getProjectPath } from '../core/utils/projectPath.js';
 
 const log = createLogger('[Exporters]');
 
 const GLOBAL_M7_DIR = join(homedir(), '.m7');
 
 /**
- * Find .m7 directory — check project-level first (cwd), then global (~/.m7)
+ * Find .m7 directory — check the active project first, then global (~/.m7)
  */
 function findM7Dir(): string {
-  const projectM7 = join(process.cwd(), '.m7');
+  const projectM7 = join(getProjectPath(), '.m7');
   if (existsSync(projectM7)) return projectM7;
   return GLOBAL_M7_DIR;
 }

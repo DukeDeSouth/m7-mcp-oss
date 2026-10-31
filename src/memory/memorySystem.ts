@@ -42,11 +42,6 @@ export interface MemoryLevel {
 }
 
 export class MemorySystem {
-  private static readonly DEFAULT_CAPS = {
-    longterm: 2000,
-    conceptual: 1000,
-  } as const;
-
   private storage: MemoryLevel;
   private fogOfWar: Map<string, FogOfWarEntry>;
   private dataPath: string;
@@ -62,21 +57,26 @@ export class MemorySystem {
   private readonly MAX_PENDING_WRITES = 50; // Force flush if too many pending
   private isInitialized: boolean = false;
   private loadPromise: Promise<void> | null = null;
+  /** MEM-7: every file write of this instance runs here, one at a time */
+  private writeChain: Promise<void> = Promise.resolve();
+  /** MEM-7: a flush that is queued but has not started; later pending writes join it */
+  private queuedFlush: Promise<void> | null = null;
 
   constructor(projectPath?: string) {
     // Используем проектную папку .m7/ вместо глобальной ~/.m7-mcp
     const basePath = projectPath || getProjectPath();
     this.dataPath = path.join(basePath, '.m7');
     
-    // v9.1: Use BoundedMap to prevent unbounded memory growth in long sessions
+    // surface/working are RAM-only and bounded. Persisted levels and fog are written
+    // whole on every flush, so a bound there deletes records from disk (MEM-5).
     this.storage = {
       surface: new BoundedMap(100),
       working: new BoundedMap(500),
-      longterm: new BoundedMap(2000),
-      conceptual: new BoundedMap(1000),
+      longterm: new Map(),
+      conceptual: new Map(),
       project: this.initializeProjectMemory()
     };
-    this.fogOfWar = new BoundedMap(500);
+    this.fogOfWar = new Map();
     // v3.15: Store promise so callers can await load completion
     this.loadPromise = this.loadPersistedMemory();
   }
@@ -98,7 +98,7 @@ export class MemorySystem {
   private scheduleFlush(): void {
     // Force immediate flush if too many pending writes
     if (this.pendingWrites.size >= this.MAX_PENDING_WRITES) {
-      this.flushPendingWrites();
+      void this.flushPendingWrites();
       return;
     }
     
@@ -108,19 +108,36 @@ export class MemorySystem {
     }
     
     this.flushTimer = setTimeout(() => {
-      this.flushPendingWrites();
+      void this.flushPendingWrites();
     }, this.FLUSH_DELAY_MS);
   }
-  
+
+  /** MEM-7: run a file write after every write queued before it. */
+  private serializeWrite(task: () => Promise<void>): Promise<void> {
+    const run = this.writeChain.then(task);
+    this.writeChain = run.catch(() => {});
+    return run;
+  }
+
   /**
-   * v3.9: Flush all pending writes to disk
+   * v3.9: Flush all pending writes to disk. Resolves when they are written,
+   * including every write queued before this call (MEM-7).
    */
-  private async flushPendingWrites(): Promise<void> {
+  private flushPendingWrites(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    
+    if (!this.queuedFlush) {
+      this.queuedFlush = this.serializeWrite(async () => {
+        this.queuedFlush = null;
+        await this.writePendingLevels();
+      });
+    }
+    return this.queuedFlush;
+  }
+
+  private async writePendingLevels(): Promise<void> {
     if (this.pendingWrites.size === 0) return;
     
     const writes = new Map(this.pendingWrites);
@@ -157,6 +174,7 @@ export class MemorySystem {
    */
   async shutdown(): Promise<void> {
     await this.flushPendingWrites();
+    await this.writeChain;
   }
 
   private initializeProjectMemory(): ProjectMemory {
@@ -170,19 +188,6 @@ export class MemorySystem {
       businessDomain: 'Domain not yet identified',
       lastUpdated: new Date()
     };
-  }
-
-  private resizeStorageCap(level: 'longterm' | 'conceptual', minFromFile: number): void {
-    const map = this.storage[level];
-    const floor = MemorySystem.DEFAULT_CAPS[level];
-    // Headroom +1 so a single store after load does not evict a loaded row (MEM-4 acceptance)
-    const target =
-      minFromFile > 0
-        ? Math.max(floor, minFromFile + 1)
-        : floor;
-    if (map instanceof BoundedMap && target > map.capacity) {
-      map.setMaxSize(target);
-    }
   }
 
   private async loadPersistedMemory() {
@@ -203,7 +208,6 @@ export class MemorySystem {
       const fogPath = `${this.dataPath}/memory/fog_of_war.json`;
       const fogResult = await safeReadJSON<FogOfWarEntry[]>(fogPath);
       if (fogResult.data) {
-        // v9.1: Preserve BoundedMap — clear and repopulate instead of replacing
         this.fogOfWar.clear();
         for (const e of fogResult.data) {
           this.fogOfWar.set(e.path, normalizeFogEntry(e));
@@ -220,18 +224,11 @@ export class MemorySystem {
         if (levelResult.data) {
           this.explicitDeletes[level] = 0;
           const entries = levelResult.data;
-          const n = Object.keys(entries).length;
-          this.resizeStorageCap(level, n);
           this.storage[level].clear();
           for (const [k, v] of Object.entries(entries)) {
             this.storage[level].set(k, v);
           }
-          this.loadedEntryCount[level] = n;
-          if (n > MemorySystem.DEFAULT_CAPS[level]) {
-            log.info(
-              `MemorySystem] ${level} loaded ${n} entries (above default cap ${MemorySystem.DEFAULT_CAPS[level]})`
-            );
-          }
+          this.loadedEntryCount[level] = Object.keys(entries).length;
           if (levelResult.recoveredFrom) {
             log.warn(`${level} memory recovered from backup: ${levelResult.recoveredFrom}`);
           }
@@ -245,15 +242,17 @@ export class MemorySystem {
   }
 
   async updateProjectMemory(updates: Partial<ProjectMemory>) {
+    await this.ensureLoaded();
     this.storage.project = {
       ...this.storage.project,
       ...updates,
       lastUpdated: new Date()
     };
-    await this.persistProjectMemory();
+    await this.serializeWrite(() => this.persistProjectMemory());
   }
 
   async discoverTechnicalDetail(path: string, discovery: FogOfWarEntry) {
+    await this.ensureLoaded();
     // Check if we already know this
     const existing = this.fogOfWar.get(path);
     
@@ -283,7 +282,7 @@ export class MemorySystem {
       }
     }
 
-    await this.persistFogOfWar();
+    await this.serializeWrite(() => this.persistFogOfWar());
   }
 
   private checkConflict(existing: FogOfWarEntry, newEntry: FogOfWarEntry): boolean {
@@ -326,6 +325,7 @@ export class MemorySystem {
       await this.updateProjectMemory(data);
       return;
     }
+    await this.ensureLoaded();
 
     const levelKey = `${level}:${key}`;
     
@@ -436,7 +436,7 @@ export class MemorySystem {
         // Cancel pending write for this key to prevent race condition
         this.pendingWrites.delete(`${level}:${key}`);
         // Immediate persist — not debounced
-        await this.persistLevel(level);
+        await this.serializeWrite(() => this.persistLevel(level));
       }
       return existed;
     }

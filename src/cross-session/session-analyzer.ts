@@ -4,6 +4,8 @@
  * Analyzes completed sessions to extract patterns and outcomes.
  */
 
+import * as path from 'path';
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { 
   SessionRecord, 
   SessionAction, 
@@ -32,7 +34,7 @@ export class SessionAnalyzer {
   private projectId: string;
 
   constructor(projectId?: string) {
-    this.projectId = projectId || this.extractProjectId();
+    this.projectId = projectId || path.basename(getProjectPath()) || 'unknown';
   }
 
   /**
@@ -121,14 +123,6 @@ export class SessionAnalyzer {
     return Object.entries(session.phaseRequirements)
       .filter(([_, completed]) => completed)
       .map(([req, _]) => req);
-  }
-
-  /**
-   * Extract project ID from current working directory
-   */
-  private extractProjectId(): string {
-    const cwd = process.cwd();
-    return cwd.split('/').pop() || 'unknown';
   }
 
   /**

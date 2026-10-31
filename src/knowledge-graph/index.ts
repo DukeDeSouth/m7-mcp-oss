@@ -13,6 +13,9 @@ export { ImpactAnalyzer } from './impact-analyzer.js';
 export { CycleDetector } from './cycle-detector.js';
 export { MermaidGenerator } from './mermaid-generator.js';
 
+import { existsSync, statSync } from 'fs';
+import { join } from 'path';
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { GraphStore } from './graph-store.js';
 import { ImpactAnalyzer } from './impact-analyzer.js';
 import { CycleDetector } from './cycle-detector.js';
@@ -419,10 +422,6 @@ export function getKnowledgeGraph(): KnowledgeGraph {
   if (!kgLazyLoaded) {
     kgLazyLoaded = true;
     try {
-      const { getProjectPath } = require('../core/utils/projectPath.js');
-      const { existsSync, statSync } = require('fs');
-      const { join } = require('path');
-      
       const projectPath = getProjectPath();
       const cacheFile = join(projectPath, '.m7', 'knowledge-graph.json');
       const MAX_CACHE_AGE_MS = 24 * 60 * 60 * 1000; // 24h

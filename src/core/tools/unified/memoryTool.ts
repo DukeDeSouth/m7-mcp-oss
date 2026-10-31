@@ -219,12 +219,20 @@ function buildDependencyStoreOptions(params: {
   };
 }
 
-function appendConflictReportIfAny(memory: UnifiedMemoryCore, response: string): string {
-  const conflicts = memory.getActiveConflicts();
+async function appendConflictReportIfAny(memory: UnifiedMemoryCore, response: string): Promise<string> {
+  const conflicts = await memory.getActiveConflicts();
   if (conflicts.length === 0) {
     return response;
   }
-  const report = buildConflictReport(conflicts, (id) => memory.getRecordSync(id));
+  const lookup = new Map<string, MemoryRecord | null>();
+  for (const c of conflicts) {
+    for (const id of [c.recordA, c.recordB]) {
+      if (!lookup.has(id)) {
+        lookup.set(id, await memory.get(id));
+      }
+    }
+  }
+  const report = buildConflictReport(conflicts, (id) => lookup.get(id) ?? null);
   return `${response}\n${report}\n`;
 }
 
@@ -393,7 +401,7 @@ export const unifiedMemoryTool = {
             response += `**Relations:** ${JSON.stringify(record.dependencyRelations)}\n`;
           }
           response += `✅ Record stored. Will auto-promote based on access patterns.\n`;
-          response = appendConflictReportIfAny(memory, response);
+          response = await appendConflictReportIfAny(memory, response);
           break;
         }
 
@@ -444,7 +452,7 @@ export const unifiedMemoryTool = {
             }
           }
 
-          response = appendConflictReportIfAny(memory, response);
+          response = await appendConflictReportIfAny(memory, response);
           break;
         }
 
@@ -641,7 +649,7 @@ export const unifiedMemoryTool = {
           if (filtered.length > 10) {
             response += `... and ${filtered.length - 10} more fog entries below threshold\n`;
           }
-          response = appendConflictReportIfAny(memory, response);
+          response = await appendConflictReportIfAny(memory, response);
           break;
         }
 

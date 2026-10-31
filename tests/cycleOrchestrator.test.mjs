@@ -11,10 +11,15 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { tmpdir } from 'os';
 
-// We need to set PROJECT_PATH before importing the orchestrator
-const TEST_DIR = path.join(import.meta.dirname, '..', '.test-cycles-' + Date.now());
-process.env.M7_PROJECT_PATH = path.join(import.meta.dirname, '..');
+// All cycles of this file live in a throwaway project. CURSOR_WORKSPACE must be
+// set too: it outranks M7_PROJECT_PATH, and run-tests.sh pins it to the repo root.
+const PROJECT = await fs.mkdtemp(path.join(tmpdir(), 'm7-cycle-orch-'));
+process.env.M7_PROJECT_PATH = PROJECT;
+process.env.CURSOR_WORKSPACE = PROJECT;
+const { resetProjectPathStateForTests } = await import('../dist/core/utils/projectPath.js');
+resetProjectPathStateForTests();
 
 const { CycleOrchestrator } = await import('../dist/core/orchestrator/cycleOrchestrator.js');
 const { getPhaseConfig, PHASE_CONFIGS } = await import('../dist/core/orchestrator/templates/phases.js');
@@ -27,12 +32,17 @@ const {
 // ═══════════════════════════════════════════════════════════════
 
 function gateIdFromResponse(response) {
-  const text = [
-    response?.instruction?.instruction,
-    response?.instruction?.gate?.prompt,
-    response?.instruction?.artifact?.template,
-  ].filter(Boolean).join('\n');
+  const text = gatePromptText(response.instruction ?? response);
   return extractGateInstructionId(text);
+}
+
+function gatePromptText(instruction) {
+  if (!instruction) return '';
+  return [
+    instruction.instruction,
+    instruction.gate?.prompt,
+    instruction.artifact?.template,
+  ].filter(Boolean).join('\n');
 }
 
 async function reflectAfterGate(orch, taskId, decision, summary) {
@@ -215,7 +225,7 @@ describe('ensureTemplateHeader', () => {
     
     // Read the file from disk
     const slug = start.taskId.replace(/^cycle_/, '').replace(/_\d+$/, '');
-    const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
+    const cyclesBase = path.join(PROJECT, 'm7-cycles');
     const dirs = await fs.readdir(cyclesBase);
     const cycleDir = dirs.find(d => d.includes('test-header-preserve'));
     
@@ -237,7 +247,7 @@ describe('ensureTemplateHeader', () => {
     const contentNoHeader = 'Just some raw content without any markdown header.\n' + 'x'.repeat(150);
     await orch.submitArtifact(start.taskId, contentNoHeader);
     
-    const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
+    const cyclesBase = path.join(PROJECT, 'm7-cycles');
     const dirs = await fs.readdir(cyclesBase);
     const cycleDir = dirs.find(d => d.includes('test-header-prepend'));
     
@@ -259,7 +269,7 @@ describe('ensureTemplateHeader', () => {
     
     await orch.submitArtifact(start.taskId, fakeArtifactNoHeader());
     
-    const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
+    const cyclesBase = path.join(PROJECT, 'm7-cycles');
     const dirs = await fs.readdir(cyclesBase);
     const cycleDir = dirs.find(d => d.includes('placeholder-replacement'));
     
@@ -621,13 +631,8 @@ describe('Full Cycle Flow', () => {
     
     await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
     
-    const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
-    const dirs = await fs.readdir(cyclesBase);
-    const cycleDir = dirs.find(d => d.includes('test-disk-write'));
-    
-    assert.ok(cycleDir, 'Cycle directory should exist');
-    
-    const filePath = path.join(cyclesBase, cycleDir, 'INTAKE.md');
+    const st = await orch.getState(start.taskId);
+    const filePath = path.join(PROJECT, 'm7-cycles', st.taskSlug, 'INTAKE.md');
     const stat = await fs.stat(filePath);
     assert.ok(stat.isFile(), 'INTAKE.md should exist on disk');
     assert.ok(stat.size > 100, 'File should have content');
@@ -640,7 +645,7 @@ describe('Full Cycle Flow', () => {
     await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
     await reflectAfterGate(orch, start.taskId, 'continue', 'Looks good');
     
-    const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
+    const cyclesBase = path.join(PROJECT, 'm7-cycles');
     const dirs = await fs.readdir(cyclesBase);
     const cycleDir = dirs.find(d => d.includes('test-reflection-disk'));
     
@@ -726,26 +731,26 @@ describe('Instruction Format', () => {
       'nextCall should contain task ID');
   });
 
-  it('gate instruction contains carry-forward AND gate template', async () => {
+  it('gate prompt appears once in formatted MCP response (GATE-3)', async () => {
+    const { formatCycleResponse } = await import('../dist/core/tools/cycleTool.js');
     const orch = new CycleOrchestrator();
-    const start = await orch.startCycle('Test gate format');
-    
+    const start = await orch.startCycle('Test gate format GATE-3');
+
     await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
-    const gate = await orch.getCurrentInstruction(start.taskId);
-    
-    const instruction = gate.instruction.instruction;
-    assert.ok(instruction.includes('Reflection Gate'),
-      'Gate should contain Reflection Gate template');
-    assert.ok(instruction.includes('decision'),
-      'Gate should contain decision options');
-    assert.ok(instruction.includes('continue'),
-      'Gate should list continue option');
-    assert.ok(instruction.includes('pivot'),
-      'Gate should list pivot option');
-    assert.ok(instruction.includes('rewind'),
-      'Gate should list rewind option');
-    assert.ok(instruction.includes('abort'),
-      'Gate should list abort option');
+    const gateResp = await orch.getCurrentInstruction(start.taskId);
+    assert.ok(gateResp.success);
+    const instr = gateResp.instruction;
+
+    assert.ok(instr?.gate?.prompt, 'gate.prompt must be set');
+    assert.ok(!instr.instruction.includes('"decision"'),
+      'instruction body must not embed full reflection JSON template');
+
+    const formatted = formatCycleResponse(instr);
+    const gateIdMatches = formatted.match(/## Gate-ID:/g) ?? [];
+    assert.equal(gateIdMatches.length, 1, `Gate-ID blocks: ${gateIdMatches.length}`);
+    const reflectionSections = formatted.match(/## 🚦 Reflection Gate/g) ?? [];
+    assert.equal(reflectionSections.length, 1);
+    assert.ok(formatted.includes('decision'), 'gate section must include template');
   });
 
   it('progress bar format is correct', async () => {
@@ -770,8 +775,17 @@ describe('Edge Cases', () => {
     
     assert.ok(start.taskId.startsWith('cycle_'),
       'Task ID should start with cycle_');
-    assert.ok(/^cycle_[a-z0-9-]+_\d{6}$/.test(start.taskId),
+    assert.ok(/^cycle_[a-z0-9-]+_[0-9a-f]{6}$/.test(start.taskId),
       `Task ID should match pattern: ${start.taskId}`);
+  });
+
+  it('HYG-1: non-Latin descriptions yield distinct non-empty ids', async () => {
+    const orch = new CycleOrchestrator();
+    const a = await orch.startCycle('Исправить баг A');
+    const b = await orch.startCycle('Исправить баг B');
+    assert.notEqual(a.taskId, b.taskId);
+    assert.match(a.taskId, /^cycle_[a-z0-9-]+_[0-9a-f]{6}$/);
+    assert.match(b.taskId, /^cycle_[a-z0-9-]+_[0-9a-f]{6}$/);
   });
 
   it('special characters in task description are handled', async () => {
@@ -875,9 +889,9 @@ describe('discovery frontier gate', () => {
     );
 
     assert.ok(afterDiscovery.success);
-    assert.equal(typeof afterDiscovery.instruction.instruction, 'string');
+    const gateText = gatePromptText(afterDiscovery.instruction);
     assert.ok(
-      afterDiscovery.instruction.instruction.includes('Fog Frontier Report'),
+      gateText.includes('Fog Frontier Report'),
       'Discovery gate should include frontier report'
     );
     assert.ok(
@@ -928,14 +942,13 @@ ${JSON.stringify({
     const afterSolution = await orch.submitArtifact(start.taskId, solutionArtifact);
 
     assert.ok(afterSolution.success);
-    assert.equal(typeof afterSolution.instruction.instruction, 'string');
+    const gateText = gatePromptText(afterSolution.instruction);
     assert.ok(
-      afterSolution.instruction.instruction.includes('Epistemic Grounding Report'),
+      gateText.includes('Epistemic Grounding Report'),
       'Solution gate should include grounding report'
     );
     assert.ok(
-      afterSolution.instruction.instruction.includes('STRONG') ||
-        afterSolution.instruction.instruction.includes('ASSUMED'),
+      gateText.includes('STRONG') || gateText.includes('ASSUMED'),
       'ASSUMED premise on irreversible step should warn'
     );
   });
@@ -968,7 +981,7 @@ describe('solution adversarial gate', () => {
 
     assert.ok(afterSolution.success);
     assert.ok(
-      afterSolution.instruction.instruction.includes('Adversarial Review Gate'),
+      gatePromptText(afterSolution.instruction).includes('Adversarial Review Gate'),
       'Solution gate should include adversarial extension'
     );
   });
@@ -982,7 +995,7 @@ describe('solution adversarial gate', () => {
 
     assert.ok(afterSolution.success);
     assert.ok(
-      afterSolution.instruction.instruction.includes('Incomplete adversarial review'),
+      gatePromptText(afterSolution.instruction).includes('Incomplete adversarial review'),
       'Missing adversarial section should warn'
     );
   });
@@ -995,7 +1008,7 @@ describe('control channel gate', () => {
     const afterIntake = await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
 
     assert.ok(afterIntake.success);
-    const prompt = afterIntake.instruction.instruction;
+    const prompt = gatePromptText(afterIntake.instruction);
     assert.ok(prompt.includes('## Gate-ID: gate_'), 'Gate prompt must include Gate-ID block');
     assert.ok(prompt.includes('mcp_m7_cycle'), 'Gate prompt must include control channel notice');
     assert.ok(gateIdFromResponse(afterIntake), 'Gate-ID must be extractable');
@@ -1053,13 +1066,8 @@ describe('control channel gate', () => {
     const start = await orch.startCycle('Test legacy gate skip');
     await orch.submitArtifact(start.taskId, fakeArtifact('intake'));
 
-    const statePath = path.join(
-      import.meta.dirname,
-      '..',
-      '.m7',
-      'cycles',
-      `${start.taskId}.json`
-    );
+    const projectPath = PROJECT;
+    const statePath = path.join(projectPath, '.m7', 'cycles', `${start.taskId}.json`);
     const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
     delete state.gateInstructionId;
     delete state.gateInstructionIssuedAt;
@@ -1136,7 +1144,7 @@ describe('STATE-1 persist failure', () => {
     if (process.platform === 'win32') {
       return;
     }
-    const projectPath = process.env.M7_PROJECT_PATH || path.join(import.meta.dirname, '..');
+    const projectPath = PROJECT;
     const cyclesPath = path.join(projectPath, '.m7', 'cycles');
     await fs.mkdir(cyclesPath, { recursive: true });
 
@@ -1164,23 +1172,7 @@ describe('STATE-1 persist failure', () => {
 // ═══════════════════════════════════════════════════════════════
 
 after(async () => {
-  const cyclesBase = path.join(import.meta.dirname, '..', 'm7-cycles');
-  const cleanup = async () => {
-    const dirs = await fs.readdir(cyclesBase);
-    const testDirs = dirs.filter(d =>
-      /test|concurrent-test|list-test|full-cycle-integration|placeholder-replacement|rule-reinjection|control-channel|gate-forgery|gate-id|legacy-gate|invalid-reflection|premature-reflection|gate-weights|gate-continue|gate-pivot|gate-rewind|gate-abort|rewind-limit|confidence-clamp|special-characters|carry-forward|template-header|artifact-too-short|nonexistent|reflection-append|progress-percentage|complete-all-7|instruction-format|discovery-frontier|solution-adversarial|solution-grounding|adversarial-missing|epistemic-grounding|fog-frontier|sprint-8|sprint-7|promotion|epistemic-status/i.test(d)
-    );
-    await Promise.all(
-      testDirs.map(dir => fs.rm(path.join(cyclesBase, dir), { recursive: true, force: true }))
-    );
-  };
-
-  await Promise.race([
-    cleanup(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('cleanup timeout')), 15000)),
-  ]).catch(() => {
-    // Best-effort cleanup — do not fail the run
-  });
+  await fs.rm(PROJECT, { recursive: true, force: true }).catch(() => {});
 }, { timeout: 20000 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1222,7 +1214,7 @@ describe('CYC-4 pinned projectPath', () => {
       await assert.rejects(() => fs.access(stateUnderB), /ENOENT|not found/i);
     } finally {
       resetProjectPathStateForTests();
-      process.env.M7_PROJECT_PATH = path.join(import.meta.dirname, '..');
+      process.env.M7_PROJECT_PATH = PROJECT;
       await fs.rm(dirA, { recursive: true, force: true }).catch(() => {});
       await fs.rm(dirB, { recursive: true, force: true }).catch(() => {});
     }
@@ -1437,16 +1429,33 @@ describe('CYC-7 artifact resubmit trace', () => {
       `# DISCOVERY: CYC-7\n\n${markerB}\n\n${'b'.repeat(120)}`
     );
 
-    const projectPath = process.env.M7_PROJECT_PATH || path.join(import.meta.dirname, '..');
-    const stateRaw = await fs.readFile(
-      path.join(projectPath, '.m7', 'cycles', `${start.taskId}.json`),
-      'utf8'
-    );
-    const state = JSON.parse(stateRaw);
+    const projectPath = PROJECT;
+    const state = await orch.getState(start.taskId);
     const filePath = path.join(projectPath, 'm7-cycles', state.taskSlug, 'DISCOVERY.md');
     const raw = await fs.readFile(filePath, 'utf8');
     assert.ok(raw.includes(markerA), 'first discovery version must remain');
     assert.ok(raw.includes('resubmitted'), 'separator expected on resubmit');
     assert.ok(raw.includes(markerB), 'second discovery version must be present');
+  });
+});
+
+describe('CYC-8 registry dedupe', () => {
+  it('registerSummary updates existing folder row instead of duplicating', async () => {
+    const orch = new CycleOrchestrator();
+    const start = await orch.startCycle('CYC-8 registry dedupe test');
+    const r1 = await orch.registerSummary(start.taskId, 'summary alpha');
+    assert.ok(r1.success);
+    const r2 = await orch.registerSummary(start.taskId, 'summary beta');
+    assert.ok(r2.success);
+
+    const projectPath = PROJECT;
+    const regPath = path.join(projectPath, 'CYCLE_REGISTRY.md');
+    const reg = await fs.readFile(regPath, 'utf8');
+    const state = await orch.getState(start.taskId);
+    const folder = `m7-cycles/${state.taskSlug}`;
+    const rows = reg.split('\n').filter(l => l.includes(folder));
+    assert.equal(rows.length, 1, 'expected single registry row for folder');
+    assert.ok(rows[0].includes('summary beta'));
+    assert.ok(!reg.includes('summary alpha'), 'stale summary should be replaced');
   });
 });
