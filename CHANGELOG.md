@@ -19,6 +19,7 @@ that mention those pieces describe history, not what ships here.
 
 ### Fixed
 - **HYG-11:** `require()` in three ES modules threw `ReferenceError` (the package is `"type": "module"`) and the surrounding `catch` hid it: joining the mesh never wrote the presence file, the knowledge-graph cache was never read, and `createTSISystem()` threw. Replaced with static imports; the acceptance suite scans the TypeScript AST of `src/` for `require(...)` calls.
+- **Windows:** every atomic write failed with `EPERM, fsync`, because the temp file was reopened read-only before `sync()`; it is opened `r+` now (#7). The Cursor project slug was decoded with POSIX separators only, so on Windows the project path fell back to cwd; the drive root and both separators are handled (#8). Thanks to @conradipui-glitch (#9).
 
 ### Tests
 - **MEM-7:** The ordering test holds the first file write and counts concurrent writes instead of waiting 2.5 s, so the "no write queue" mutant is killed on every run (it survived some runs before).

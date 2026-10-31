@@ -129,4 +129,6 @@ Also: stale `dist/` modules from deleted sources (now cleaned by `prebuild`), te
 
 The MEM-7 ordering test no longer depends on timing. It waited 2.5 s and relied on concurrent writes finishing out of order, so the "no write queue" mutant survived some runs. It now holds the first file write and counts concurrent writes.
 
+Also in this release: two Windows fixes from @conradipui-glitch in #9 (atomic writes failed with `EPERM, fsync`; the Cursor project slug was never decoded on Windows), reported as #7 and #8.
+
 All items in KNOWN_ISSUES are fixed as of v3.22.2. New defects go into KNOWN_ISSUES with the same template; contributors: open an issue with the ID in the title, follow [CONTRIBUTING.md](../CONTRIBUTING.md).
