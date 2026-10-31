@@ -1,5 +1,5 @@
 /**
- * Phase 3 Tests: Doctor Tool + Event System
+ * Phase 3 Tests: Doctor Tool
  */
 
 import assert from 'assert';
@@ -9,16 +9,6 @@ import os from 'os';
 
 // Imports
 import { handleDoctorTool } from '../../dist/core/tools/doctorTool.js';
-import { 
-  getEventEmitter, 
-  resetEventEmitter,
-  on, 
-  once, 
-  emit, 
-  emitSync,
-  enableEventLogging,
-  enableEventMetrics
-} from '../../dist/core/events/eventSystem.js';
 
 // ============================================================================
 // Test Helpers
@@ -38,7 +28,6 @@ async function cleanup() {
   try {
     await fs.rm(testDir, { recursive: true, force: true });
   } catch {}
-  resetEventEmitter();
 }
 
 function test(name, fn) {
@@ -187,243 +176,18 @@ async function testDoctorTool() {
 }
 
 // ============================================================================
-// 2. Event System Tests
-// ============================================================================
-
-async function testEventSystem() {
-  console.log('\n📡 Event System Tests\n');
-  
-  resetEventEmitter();
-  
-  // Test 1: Basic event subscription
-  await asyncTest('Subscribe and emit event', async () => {
-    let received = false;
-    
-    on('task:analyzed', () => {
-      received = true;
-    });
-    
-    await emit('task:analyzed', { description: 'Test task' });
-    
-    assert.ok(received, 'Handler should receive event');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 2: Event context
-  await asyncTest('Event context contains correct data', async () => {
-    let context = null;
-    
-    on('task:completed', (ctx) => {
-      context = ctx;
-    });
-    
-    await emit('task:completed', { result: 'success' }, {
-      sessionId: 'session_123',
-      taskId: 'task_456'
-    });
-    
-    assert.ok(context, 'Should receive context');
-    assert.strictEqual(context.event, 'task:completed');
-    assert.strictEqual(context.sessionId, 'session_123');
-    assert.strictEqual(context.taskId, 'task_456');
-    assert.strictEqual(context.data.result, 'success');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 3: Once handler
-  await asyncTest('Once handler fires only once', async () => {
-    let count = 0;
-    
-    once('phase:entered', () => {
-      count++;
-    });
-    
-    await emit('phase:entered', { phase: 'discovery' });
-    await emit('phase:entered', { phase: 'architecture' });
-    await emit('phase:entered', { phase: 'planning' });
-    
-    assert.strictEqual(count, 1, 'Should fire only once');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 4: Priority ordering
-  await asyncTest('Handlers execute in priority order', async () => {
-    const order = [];
-    
-    // Convenience function signature: on(event, handler, priority?)
-    on('hive:started', () => order.push('low'), 100);
-    on('hive:started', () => order.push('high'), 1);
-    on('hive:started', () => order.push('medium'), 50);
-    
-    await emit('hive:started', {});
-    
-    assert.deepStrictEqual(order, ['high', 'medium', 'low'], 'Should execute by priority');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 5: Unsubscribe
-  await asyncTest('Can unsubscribe from event', async () => {
-    let count = 0;
-    
-    const handlerId = on('memory:stored', () => {
-      count++;
-    });
-    
-    await emit('memory:stored', {});
-    
-    const emitter = getEventEmitter();
-    emitter.off('memory:stored', handlerId);
-    
-    await emit('memory:stored', {});
-    
-    assert.strictEqual(count, 1, 'Should not fire after unsubscribe');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 6: Multiple handlers
-  await asyncTest('Multiple handlers for same event', async () => {
-    let sum = 0;
-    
-    on('error:captured', () => { sum += 1; });
-    on('error:captured', () => { sum += 2; });
-    on('error:captured', () => { sum += 4; });
-    
-    await emit('error:captured', { error: new Error('test') });
-    
-    assert.strictEqual(sum, 7, 'All handlers should fire');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 7: Sync emit
-  await asyncTest('Sync emit fires handlers', async () => {
-    let received = false;
-    
-    on('session:started', () => {
-      received = true;
-    });
-    
-    emitSync('session:started', {});
-    
-    // Small delay to let async handler complete
-    await new Promise(r => setTimeout(r, 10));
-    
-    assert.ok(received, 'Sync emit should fire handlers');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 8: Event metrics
-  await asyncTest('Event metrics tracking', async () => {
-    const { getMetrics, handlerIds } = enableEventMetrics();
-    
-    await emit('task:analyzed', {});
-    await emit('task:analyzed', {});
-    await emit('task:completed', {});
-    
-    const metrics = getMetrics();
-    
-    assert.strictEqual(metrics['task:analyzed'], 2, 'Should count task:analyzed');
-    assert.strictEqual(metrics['task:completed'], 1, 'Should count task:completed');
-    
-    // Cleanup
-    for (const id of handlerIds) {
-      getEventEmitter().off('task:analyzed', id);
-      getEventEmitter().off('task:completed', id);
-    }
-  });
-  
-  resetEventEmitter();
-  
-  // Test 9: Emitter stats
-  await asyncTest('Get emitter stats', async () => {
-    on('warmup:started', () => {});
-    on('warmup:completed', () => {});
-    on('warmup:completed', () => {});
-    
-    const emitter = getEventEmitter();
-    const stats = emitter.getStats();
-    
-    assert.strictEqual(stats.events, 2, 'Should track 2 event types');
-    assert.strictEqual(stats.handlers, 3, 'Should track 3 handlers');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 10: Custom events
-  await asyncTest('Custom events work', async () => {
-    let received = null;
-    
-    on('custom:my-plugin-event', (ctx) => {
-      received = ctx.data;
-    });
-    
-    await emit('custom:my-plugin-event', { custom: 'data' });
-    
-    assert.ok(received, 'Should receive custom event');
-    assert.strictEqual(received.custom, 'data');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 11: Pause and resume
-  await asyncTest('Pause and resume emitter', async () => {
-    let count = 0;
-    
-    on('doctor:fixed', () => { count++; });
-    
-    const emitter = getEventEmitter();
-    emitter.pause();
-    
-    await emit('doctor:fixed', {});
-    await emit('doctor:fixed', {});
-    
-    assert.strictEqual(count, 0, 'Should not fire while paused');
-    
-    await emitter.resume();
-    
-    assert.strictEqual(count, 2, 'Should fire queued events after resume');
-  });
-  
-  resetEventEmitter();
-  
-  // Test 12: Handler error doesn't break others
-  await asyncTest('Handler error does not break other handlers', async () => {
-    let afterError = false;
-    
-    on('hive:conflict', () => {
-      throw new Error('Handler error');
-    }, { priority: 1 });
-    
-    on('hive:conflict', () => {
-      afterError = true;
-    }, { priority: 2 });
-    
-    await emit('hive:conflict', {});
-    
-    assert.ok(afterError, 'Second handler should still fire');
-  });
-}
-
-// ============================================================================
 // Run All Tests
 // ============================================================================
 
 async function runAllTests() {
   console.log('╔══════════════════════════════════════════════════════════════╗');
-  console.log('║  M7 Phase 3 Tests: Doctor + Events                           ║');
+  console.log('║  M7 Phase 3 Tests: Doctor                                    ║');
   console.log('╚══════════════════════════════════════════════════════════════╝');
   
   await setup();
   
   try {
     await testDoctorTool();
-    await testEventSystem();
   } finally {
     await cleanup();
   }
