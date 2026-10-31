@@ -25,7 +25,7 @@ m7-mcp-oss/
 │   │   ├── config/           ← feature flags loaded from config/m7-config.yaml
 │   │   ├── router.ts         ← task routing (simple / standard / full cycle)
 │   │   ├── safety/           ← deterministic intent/safety rules
-│   │   ├── task-graph/, task-transfer/, scope/, session/, templates/ ...
+│   │   ├── task-graph/, task-transfer/, scope/, templates/ ...
 │   ├── memory/               ← tiered memory, fog of war, epistemic status, ChromaDB (optional)
 │   ├── hive/                 ← multi-agent coordinator (OpenAI / Anthropic clients)
 │   ├── tsi/                  ← Tech Safety Intelligence: YAML pattern packs in src/tsi/patterns

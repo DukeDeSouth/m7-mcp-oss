@@ -18,7 +18,7 @@ src/index.ts (M7MCPServer)
   └─ tool handlers
        ├─ analyze_task ─► TaskRouter ─► session + cycle
        ├─ cycle ────────► CycleOrchestrator (phases, reflection gates, carry-forward)
-       ├─ memory ───────► MemoryManager (tiers, confidence, fog of war, epistemic status)
+       ├─ memory ───────► UnifiedMemoryCore (tiers, confidence, fog of war, epistemic status)
        ├─ hive_* ───────► Hive coordinator (multi-agent runs)
        ├─ tsi/* ────────► YAML pattern packs (tech safety)
        └─ telemetry ────► local collector (remote upload opt-in)
@@ -35,9 +35,7 @@ path and `~/.m7/` (telemetry consent/config).
 | `@modelcontextprotocol/sdk` | MCP protocol / stdio transport |
 | `zod` | tool input schemas |
 | `js-yaml` | config and TSI patterns |
-| `chromadb` (optional) | vector memory; falls back to local JSON when unavailable |
 | `openai`, `@anthropic-ai/sdk` | Hive agents |
-| `chokidar` | file watchers |
 
 ## Data Files
 
