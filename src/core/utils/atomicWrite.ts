@@ -108,7 +108,9 @@ export async function atomicWrite(
     result.bytesWritten = buffer.length;
     
     // Step 2: Sync to disk (critical for crash safety)
-    const tempHandle = await fs.open(tempPath, 'r');
+    // NOTE: opened 'r+' (not 'r') — FlushFileBuffers on Windows requires write
+    // access through the handle; fsync on a read-only handle fails with EPERM.
+    const tempHandle = await fs.open(tempPath, 'r+');
     await tempHandle.sync();
     await tempHandle.close();
     
