@@ -4,8 +4,6 @@ import { join } from 'path';
 import yaml from 'js-yaml';
 import { JournalSystem } from '../journal/journalSystem';
 import { getProjectPath } from '../core/utils/projectPath.js';
-// v5.0: Use UnifiedMemoryCore instead of MemorySystem
-import { getMemoryCore, UnifiedMemoryCore } from '../memory/auto/unified-memory-core.js';
 
 export interface ProjectSchema {
   project: {
@@ -58,7 +56,6 @@ export class SchemaSystem {
   private schemaPath: string;
   private schema: ProjectSchema | null = null;
   private lastModified: Date | null = null;
-  private memoryCore: UnifiedMemoryCore | null = null;
   
   constructor(
     private journal: JournalSystem,
@@ -84,25 +81,7 @@ export class SchemaSystem {
         : null;
       if (!this.schema) return null;
       this.lastModified = new Date();
-      
-      // v5.0: Store in unified memory for quick access
-      try {
-        if (!this.memoryCore) {
-          this.memoryCore = await getMemoryCore();
-        }
-        await this.memoryCore.store(
-          JSON.stringify(this.schema),
-          {
-            level: 'L2',
-            source: 'code_analysis',
-            contextKeys: ['project', 'schema', this.schema.project?.name || 'unknown'],
-            confidence: 1.0
-          }
-        );
-      } catch (memError) {
-        // Non-critical, continue without memory storage
-      }
-      
+      // Reads have no memory side effects: PROJECT_SCHEMA.yaml is the only copy (MEM-6)
       return this.schema;
     } catch (error) {
       await this.journal.logError({

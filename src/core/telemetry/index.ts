@@ -19,6 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { getProjectPath } from '../utils/projectPath.js';
 import { HookTelemetryIngester } from './ingester.js';
 import { FreestyleDetector } from './freestyleDetector.js';
 import { DiscoveryTracker } from './discoveryTracker.js';
@@ -294,7 +295,7 @@ export function getHookTelemetry(projectPath?: string): HookTelemetryFacade {
     _instance = new HookTelemetryFacade(projectPath);
   }
   if (!_instance) {
-    _instance = new HookTelemetryFacade(process.cwd());
+    _instance = new HookTelemetryFacade(getProjectPath());
   }
   return _instance;
 }

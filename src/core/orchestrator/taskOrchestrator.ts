@@ -77,16 +77,28 @@ export class TaskOrchestrator {
   private memoryCore: UnifiedMemoryCore | null = null; // v5.0: Unified memory
   private sessionsLoaded: boolean = false; // v3.10.5: Track if sessions loaded from disk
   private persistDebounce: ReturnType<typeof setTimeout> | null = null; // v3.10.5: Debounce persistence
+  private readonly sessionsFilePath: string;
+  private loadPromise: Promise<void>;
 
   constructor(
     private journal: JournalSystem
   ) {
+    // One orchestrator per project: a later project switch must not redirect this instance's writes.
+    this.sessionsFilePath = path.join(getProjectPath(), '.m7', 'orchestrator-sessions.json');
     this.crossSessionLearning = getCrossSessionLearning();
     this.initializeAgents();
     // v3.10.5: Load persisted sessions on construction
-    this.loadSessions().catch(err => {
+    this.loadPromise = this.loadSessions().catch(err => {
       log.warn(`[v3.10.5] Failed to load persisted sessions: ${err.message}`);
     });
+  }
+
+  /**
+   * Resolves once persisted sessions are in memory. The synchronous readers
+   * (getSessionStatus, getAllActiveSessions) see disk state only after this.
+   */
+  async ready(): Promise<void> {
+    await this.ensureSessionsLoaded();
   }
 
   // ============================================================================
@@ -94,8 +106,7 @@ export class TaskOrchestrator {
   // ============================================================================
 
   private getSessionsFilePath(): string {
-    const projectPath = getProjectPath();
-    return path.join(projectPath, '.m7', 'orchestrator-sessions.json');
+    return this.sessionsFilePath;
   }
 
   /**
@@ -156,10 +167,21 @@ export class TaskOrchestrator {
       clearTimeout(this.persistDebounce);
     }
     this.persistDebounce = setTimeout(() => {
+      this.persistDebounce = null;
       this.persistSessions().catch(err => {
         log.warn(`[v3.10.5] Failed to persist sessions: ${err.message}`);
       });
     }, 500); // 500ms debounce
+  }
+
+  /**
+   * Write a pending debounced persist now (shutdown, project switch).
+   */
+  async flushPersist(): Promise<void> {
+    if (!this.persistDebounce) return;
+    clearTimeout(this.persistDebounce);
+    this.persistDebounce = null;
+    await this.persistSessions();
   }
 
   private async persistSessions(): Promise<void> {
@@ -232,8 +254,10 @@ export class TaskOrchestrator {
    * Call this at the start of any public method that reads sessions.
    */
   private async ensureSessionsLoaded(): Promise<void> {
+    await this.loadPromise;
     if (!this.sessionsLoaded) {
-      await this.loadSessions();
+      this.loadPromise = this.loadSessions();
+      await this.loadPromise;
     }
   }
 
@@ -726,6 +750,7 @@ export class TaskOrchestrator {
     violations: number;
     agents: Record<string, string>;
   }> {
+    await this.ensureSessionsLoaded();
     const sessions = this.getAllActiveSessions();
     const blockedSessions = sessions.filter(s => s.blockedReasons.length > 0);
     const totalViolations = sessions.reduce((sum, s) => sum + s.violations.length, 0);

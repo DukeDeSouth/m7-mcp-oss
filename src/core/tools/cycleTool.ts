@@ -175,7 +175,7 @@ export const cycleTool = {
   }
 };
 
-function formatCycleResponse(instruction: CycleInstruction): string {
+export function formatCycleResponse(instruction: CycleInstruction): string {
   const { taskId, phase, progress, artifact, gate } = instruction;
   
   // v2: If gate is present, show gate-specific response

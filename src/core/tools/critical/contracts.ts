@@ -3,7 +3,6 @@
 import { z } from 'zod';
 import { JournalSystem } from '../../../journal/journalSystem.js';
 import { SchemaSystem } from '../../../schema/schemaSystem.js';
-import { BoundedMap } from '../../utils/boundedMap.js';
 // v5.0: Memory parameter removed - contracts use schema for persistence
 
 // API Contract types
@@ -43,16 +42,35 @@ interface DuplicationWarning {
   recommendation: string;
 }
 
+type ContractType = APIContract['type'];
+
+/** PROJECT_SCHEMA.yaml `api_contracts` section for each contract type */
+const CONTRACT_SECTIONS: ReadonlyArray<[section: string, type: ContractType]> = [
+  ['functions', 'function'],
+  ['endpoints', 'endpoint'],
+  ['methods', 'method'],
+  ['classes', 'class'],
+];
+
+/** STATE-5: register is load → modify → write of one file; two at once would drop one */
+let registerQueue: Promise<unknown> = Promise.resolve();
+
 class ContractRegistry {
-  private contracts: BoundedMap<string, APIContract> = new BoundedMap(500);
+  // Persisted whole to PROJECT_SCHEMA.yaml, so it is never bounded (MEM-5)
+  private contracts = new Map<string, APIContract>();
   private namingConventions: NamingConvention[] = [];
+  private loaded: Promise<void>;
 
   constructor(
     private journal: JournalSystem,
     private schema: SchemaSystem
   ) {
     this.initializeNamingConventions();
-    this.loadExistingContracts();
+    this.loaded = this.loadExistingContracts();
+  }
+
+  ready(): Promise<void> {
+    return this.loaded;
   }
 
   private initializeNamingConventions(): void {
@@ -105,23 +123,24 @@ class ContractRegistry {
   private async loadExistingContracts(): Promise<void> {
     try {
       const schema = await this.schema.loadSchema();
-      if (schema && (schema as any).api_contracts) {
-        // Convert schema contracts to our format
-        if ((schema as any).api_contracts.functions) {
-          (schema as any).api_contracts.functions.forEach((func: any) => {
-            this.contracts.set(func.name, {
-              id: this.generateId(),
-              name: func.name,
-              type: 'function',
-              purpose: func.purpose || '',
-              parameters: func.parameters || [],
-              returns: func.returns,
-              usedIn: func.usedIn || [],
-              createdAt: new Date(),
-              lastModified: new Date(),
-              tags: func.tags || [],
-              examples: func.examples || []
-            });
+      const stored = (schema as any)?.api_contracts;
+      if (!stored) return;
+      for (const [section, type] of CONTRACT_SECTIONS) {
+        if (!Array.isArray(stored[section])) continue;
+        for (const entry of stored[section]) {
+          if (!entry?.name) continue;
+          this.contracts.set(entry.name, {
+            id: entry.id || this.generateId(),
+            name: entry.name,
+            type,
+            purpose: entry.purpose || '',
+            parameters: entry.parameters || [],
+            returns: entry.returns,
+            usedIn: entry.usedIn || [],
+            createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
+            lastModified: entry.lastModified ? new Date(entry.lastModified) : new Date(),
+            tags: entry.tags || [],
+            examples: entry.examples || []
           });
         }
       }
@@ -144,21 +163,33 @@ class ContractRegistry {
     success: boolean; 
     warnings?: DuplicationWarning[];
     contract?: APIContract;
+    error?: string;
   }> {
     // Check for duplicates
     const warnings = this.checkForDuplicates(contract.name, contract.purpose);
     
+    const previous = this.contracts.get(contract.name);
     const fullContract: APIContract = {
       ...contract,
-      id: this.generateId(),
-      createdAt: new Date(),
+      id: previous?.id ?? this.generateId(),
+      createdAt: previous?.createdAt ?? new Date(),
       lastModified: new Date()
     };
 
     this.contracts.set(fullContract.name, fullContract);
 
-    // Update PROJECT_SCHEMA
-    await this.updateSchema();
+    try {
+      await this.updateSchema();
+    } catch (error) {
+      if (previous) this.contracts.set(previous.name, previous);
+      else this.contracts.delete(fullContract.name);
+      return {
+        success: false,
+        error:
+          `Contract "${contract.name}" was not saved: PROJECT_SCHEMA.yaml is missing or unreadable. ` +
+          `Run mcp_m7_init_project or fix the file (${(error as Error).message})`
+      };
+    }
 
     // Log registration
     this.journal.logFeature({
@@ -345,23 +376,24 @@ class ContractRegistry {
   private async updateSchema(): Promise<void> {
     try {
       const contracts = Array.from(this.contracts.values());
+      const sections = Object.fromEntries(
+        CONTRACT_SECTIONS.map(([section, type]) => [section, contracts.filter(c => c.type === type)])
+      );
       
       await this.schema.updateSection('api_contracts' as any, {
-        functions: contracts.filter(c => c.type === 'function'),
-        endpoints: contracts.filter(c => c.type === 'endpoint'),
-        methods: contracts.filter(c => c.type === 'method'),
-        classes: contracts.filter(c => c.type === 'class'),
+        ...sections,
         naming_conventions: this.namingConventions,
         last_updated: new Date().toISOString()
       });
     } catch (error) {
-      this.journal.logError({
+      await this.journal.logError({
         type: 'schema_update_error',
         error: `Failed to update schema: ${error}`,
         context: JSON.stringify({ component: 'ContractRegistry' }),
         fixed: false,
         category: 'runtime'
       });
+      throw error;
     }
   }
 
@@ -419,29 +451,44 @@ export const contractsTool = {
     request: any,
     systems: { journal: JournalSystem; schema: SchemaSystem }
   ) => {
-    const registry = new ContractRegistry(systems.journal, systems.schema);
-
-    switch (request.action) {
-      case 'register':
-        if (!request.contract) {
-          throw new Error('Contract data required for registration');
-        }
-        
-        const result = await registry.registerContract({
+    if (request.action === 'register') {
+      if (!request.contract) {
+        throw new Error('Contract data required for registration');
+      }
+      const run = registerQueue.then(async () => {
+        const registry = new ContractRegistry(systems.journal, systems.schema);
+        await registry.ready();
+        return registry.registerContract({
           ...request.contract,
           usedIn: request.contract.usedIn || [],
           tags: request.contract.tags || [],
           examples: request.contract.examples || []
         });
+      });
+      registerQueue = run.catch(() => {});
+      const result = await run;
 
+      if (!result.success) {
         return {
-          success: result.success,
-          contract: result.contract,
-          warnings: result.warnings,
-          message: result.warnings?.length 
-            ? `⚠️ Contract registered with ${result.warnings.length} warnings`
-            : `✅ Contract "${request.contract.name}" registered successfully`
+          success: false,
+          error: result.error,
+          message: `❌ ${result.error}`
         };
+      }
+      return {
+        success: true,
+        contract: result.contract,
+        warnings: result.warnings,
+        message: result.warnings?.length 
+          ? `⚠️ Contract registered with ${result.warnings.length} warnings`
+          : `✅ Contract "${request.contract.name}" registered successfully`
+      };
+    }
+
+    const registry = new ContractRegistry(systems.journal, systems.schema);
+    await registry.ready();
+
+    switch (request.action) {
 
       case 'check':
         if (!request.name || !request.purpose) {

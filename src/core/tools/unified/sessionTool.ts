@@ -60,6 +60,7 @@ export const unifiedSessionTool = {
     const { action, session_id, requirement, evidence, notes, force, enforcement_action } = params;
 
     try {
+      await orchestrator.ready();
       let targetSessionId = session_id;
       
       // Auto-find active session if not provided

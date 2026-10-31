@@ -11,8 +11,9 @@
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, hostname } from 'os';
 
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { MeshDatabase } from './MeshDatabase.js';
 import { MeshSignals } from './MeshSignals.js';
 import {
@@ -186,7 +187,7 @@ export class MeshManager {
     const instance: MeshInstance = {
       instance_id: this.instanceId,
       pid: process.pid,
-      project_root: projectRoot || process.cwd(),
+      project_root: projectRoot || getProjectPath(),
       server_role: serverRole,
       capabilities: ['context', 'intents', 'locks'],
       started_at: now,
@@ -557,7 +558,7 @@ export class MeshManager {
       const presencePath = join(presenceDir, `instance_${instance.instance_id}.json`);
       writeFileSync(presencePath, JSON.stringify({
         ...instance,
-        hostname: require('os').hostname(),
+        hostname: hostname(),
         user: process.env.USER || process.env.USERNAME || 'unknown',
       }, null, 2), { mode: 0o600 });
     } catch { /* non-fatal */ }

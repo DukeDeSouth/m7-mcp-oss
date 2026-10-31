@@ -1,6 +1,6 @@
 # M7 MCP
 
-**Current release:** [v3.19.0](https://github.com/DukeDeSouth/m7-mcp-oss/releases/tag/v3.19.0) — clone `main` or download the release archive. There is no npm package; build from source (`npm run build`).
+**Current release:** [v3.22.2](https://github.com/DukeDeSouth/m7-mcp-oss/releases/tag/v3.22.2) — clone `main` or download the release archive. There is no npm package; build from source (`npm run build`).
 
 An MCP server that makes an AI coding agent work through a fixed seven-phase
 cycle instead of jumping straight to code. It was built for Cursor, but it
@@ -23,8 +23,9 @@ discovery, architecture, solution, impact analysis and an implementation
 simulation, write an artifact for each, and pass a reflection gate between
 phases. The server does not trust the model to "remember" the rules: it
 issues a gate ID with every phase instruction, rejects reflections that do not
-quote it, re-injects a compact rule summary after N tool calls in the same
-phase, and keeps the cycle state on disk so a new chat can pick up where the
+quote it, re-injects a compact rule summary after N calls to `mcp_m7_cycle` within the
+same phase (the MCP server only observes its own tools, not the client's other
+actions), and keeps the cycle state on disk so a new chat can pick up where the
 old one stopped.
 
 Around that cycle there is a set of supporting tools:
@@ -44,7 +45,7 @@ Around that cycle there is a set of supporting tools:
 - Task graph, task transfer between chats, architecture advisor, knowledge
   graph, error database, style guardian, DCCE text validator, mesh for
   multi-machine sessions, and a few more. The full list is in
-  [docs/TOOLS_REGISTRY.md](docs/TOOLS_REGISTRY.md); 38 tools are registered
+  [docs/TOOLS_REGISTRY.md](docs/TOOLS_REGISTRY.md); 37 tools are registered
   by `src/index.ts`.
 
 Documentation is split by reader. For the agent: [M7-GUIDE.md](M7-GUIDE.md)
@@ -69,7 +70,7 @@ For context, since harness-engineering frameworks became a popular topic in
   carry-forward context, template-driven artifacts.
 - July 2026: epistemic layer (fog of war boundaries, grounding gate, adversarial
   review gate, control-channel nonce, rule re-injection).
-- October 2026: public community-fix batches on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — v3.18.1 (batch 1), v3.19.0 (Stage 1 remainder + Stage 2 cycles); see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+- October 2026: public community-fix batches on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — v3.18.1 (batch 1), v3.19.0 (Stage 1 remainder + Stage 2 cycles), v3.20.0–v3.22.2 (Stage 2–3, acceptance suites; every item on the list is fixed); see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
 
 ## Requirements
 
@@ -128,11 +129,46 @@ in `src/core/config/featureFlags.ts`. Useful environment variables:
 | `M7_PROJECT_PATH` | target project directory |
 | `M7_DEBUG=true` | verbose logs on stderr |
 | `M7_TELEMETRY_ENDPOINT` | enable telemetry upload to a collector you run; unset means nothing leaves the machine |
-| `M7_RULE_REINJECTION_THRESHOLD` | override the per-phase tool-call count before rules are re-injected |
+| `M7_RULE_REINJECTION_THRESHOLD` | override how many `mcp_m7_cycle` calls in the same phase before rules are re-injected |
 | `CHROMA_URL` | ChromaDB base URL |
 
 Telemetry is off by default and, even when you opt in with
 `mcp_m7_telemetry`, nothing is sent unless `M7_TELEMETRY_ENDPOINT` is set.
+
+## What is stored and for how long
+
+Everything lives in the project directory: `.m7/`, `m7-cycles/` and
+`CYCLE_REGISTRY.md`.
+
+- **Cycle state**: `.m7/cycles/<task-id>.json` plus a reflection log. When a
+  new cycle starts, finished or aborted cycles untouched for 7 days are moved
+  to `.m7/cycles/archive/`. Active cycles are never moved, and nothing in the
+  archive is deleted.
+- **Cycle artifacts**: `m7-cycles/<slug>-<id suffix>/`, one folder per cycle,
+  plus one row per cycle in `CYCLE_REGISTRY.md`. The server never deletes them. A
+  resubmitted phase is appended to its file, not overwritten.
+- **Memory**: L0 (100 records) and L1 (500) are RAM only; the oldest records
+  are dropped when a level is full, and both levels are empty after a
+  restart. L2 and L4 go to `.m7/memory/longterm.json`, L3 to
+  `conceptual.json`, the fog of war to `fog_of_war.json`, and deletions to
+  `.m7/memory-tombstones.json`. These have no size limit and are kept until you
+  delete records with `mcp_m7_memory` (invalidated records stay, marked as
+  such). Writes are batched for
+  up to a second and flushed on shutdown.
+- **Task sessions** (`.m7/orchestrator-sessions.json`) are kept until you
+  delete the file. **Cross-session learning** (`.m7/cross-session/`) is
+  pruned only when you call `mcp_m7_cross_session` with `action: "cleanup"`.
+  By default that drops insights unused for 90 days or below confidence
+  0.2.
+- **Telemetry events** (`.m7/telemetry/`): the file is rotated at 10 MB and
+  rotated files are deleted after 7 days.
+- State files written atomically keep up to three previous versions next to
+  them (`.bak.1` … `.bak.3`). These are used for recovery when the main file
+  is unreadable.
+
+Other tools keep their own files under `.m7/` (style profile, knowledge graph,
+TSI, mesh). None of it leaves the machine unless you configure an endpoint for
+it.
 
 ## Development
 
@@ -142,12 +178,14 @@ npm test           # scripts/run-tests.sh: each tests/*.test.mjs with a timeout
 M7_DEBUG=true node dist/index.js   # run the server by hand
 ```
 
-Tests import from `dist/`, so build first. They write into `.m7/` in the repo
-root; that directory is git-ignored.
+Tests import from `dist/`, so build first. Tests that write state use their own
+temporary project, and `npm test` fails if a run leaves files in the repository.
 
 ## Known limitations
 
 - Both API keys are required at startup even if you never call Hive.
+- The grounding gate checks that the files and memory records a step cites
+  exist. It does not check that they support the step's claim.
 - `src/tsi` loads its YAML patterns from `src/tsi/patterns` even when running
   from `dist/`, so run it from a clone, not from a copied `dist/`.
 - Some modules keep timers alive after the work is done; the test runner uses

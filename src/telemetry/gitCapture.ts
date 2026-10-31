@@ -12,9 +12,10 @@
  * @module telemetry/gitCapture
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { createLogger } from '../core/utils/logger.js';
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { getTelemetryCollector } from './collector.js';
 import { redactSecrets, anonymizePaths } from './sanitizer.js';
 
@@ -45,12 +46,12 @@ const EXCLUDED_PATTERNS = [
 ];
 
 /**
- * Run a git command in the specified directory, return stdout or null on error
+ * Run git (no shell) in the specified directory, return stdout or null on error
  */
-function git(cmd: string, cwd?: string): string | null {
+function git(args: string[], cwd?: string): string | null {
   try {
-    return execSync(`git ${cmd}`, {
-      cwd: cwd || process.cwd(),
+    return execFileSync('git', args, {
+      cwd: cwd || getProjectPath(),
       encoding: 'utf-8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -64,7 +65,7 @@ function git(cmd: string, cwd?: string): string | null {
  * Check if current directory is a git repo
  */
 export function isGitRepo(cwd?: string): boolean {
-  return git('rev-parse --is-inside-work-tree', cwd) === 'true';
+  return git(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
 }
 
 /**
@@ -72,7 +73,7 @@ export function isGitRepo(cwd?: string): boolean {
  * Hashes the remote URL so we can correlate events without revealing the actual repo
  */
 export function getRepoHash(cwd?: string): string {
-  const remote = git('config --get remote.origin.url', cwd);
+  const remote = git(['config', '--get', 'remote.origin.url'], cwd);
   if (!remote) return 'local-repo';
   return createHash('sha256').update(remote).digest('hex').substring(0, 16);
 }
@@ -81,14 +82,14 @@ export function getRepoHash(cwd?: string): string {
  * Get current branch name
  */
 export function getCurrentBranch(cwd?: string): string | null {
-  return git('rev-parse --abbrev-ref HEAD', cwd);
+  return git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
 }
 
 /**
  * Get the latest commit hash (short)
  */
 export function getLatestCommitHash(cwd?: string): string | null {
-  return git('rev-parse --short=8 HEAD', cwd);
+  return git(['rev-parse', '--short=8', 'HEAD'], cwd);
 }
 
 /**
@@ -122,10 +123,10 @@ function detectLanguages(files: string[]): string[] {
 }
 
 /**
- * Build exclude args for git diff
+ * Pathspec arguments (after `-- .`) that exclude EXCLUDED_PATTERNS
  */
-function buildExcludeArgs(): string {
-  return EXCLUDED_PATTERNS.map(p => `':(exclude)${p}'`).join(' ');
+export function buildExcludeArgs(): string[] {
+  return EXCLUDED_PATTERNS.map(p => `:(exclude)${p}`);
 }
 
 /**
@@ -161,11 +162,11 @@ export function captureLastCommitDiff(cwd?: string): {
   const excludes = buildExcludeArgs();
   
   // Get diff from last commit
-  const diff = git(`show HEAD --format="" --patch -- . ${excludes}`, cwd);
+  const diff = git(['show', 'HEAD', '--format=', '--patch', '--', '.', ...excludes], cwd);
   if (!diff) return null;
   
   // Get numstat for additions/deletions
-  const numstat = git(`show HEAD --format="" --numstat -- . ${excludes}`, cwd);
+  const numstat = git(['show', 'HEAD', '--format=', '--numstat', '--', '.', ...excludes], cwd);
   let additions = 0;
   let deletions = 0;
   const files: string[] = [];
@@ -184,7 +185,7 @@ export function captureLastCommitDiff(cwd?: string): {
   }
   
   const commitHash = getLatestCommitHash(cwd);
-  const commitMsg = git('log -1 --format=%s', cwd);
+  const commitMsg = git(['log', '-1', '--format=%s'], cwd);
   
   return {
     diff: sanitizeDiff(diff),
@@ -211,10 +212,10 @@ export function captureStagedDiff(cwd?: string): {
   
   const excludes = buildExcludeArgs();
   
-  const diff = git(`diff --cached -- . ${excludes}`, cwd);
+  const diff = git(['diff', '--cached', '--', '.', ...excludes], cwd);
   if (!diff) return null;
   
-  const numstat = git(`diff --cached --numstat -- . ${excludes}`, cwd);
+  const numstat = git(['diff', '--cached', '--numstat', '--', '.', ...excludes], cwd);
   let additions = 0;
   let deletions = 0;
   const files: string[] = [];
@@ -289,7 +290,7 @@ export class GitCommitWatcher {
   private pollIntervalMs: number;
 
   constructor(cwd?: string, pollIntervalMs: number = 30000) {
-    this.cwd = cwd || process.cwd();
+    this.cwd = cwd || getProjectPath();
     this.pollIntervalMs = pollIntervalMs;
     this.lastKnownHead = getLatestCommitHash(this.cwd);
   }

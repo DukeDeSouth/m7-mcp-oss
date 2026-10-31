@@ -51,6 +51,7 @@ export function createScopeTool(scopeGuard: ScopeGuard, orchestrator: TaskOrches
       const { action, sessionId, budget, reason } = ScopeRequestSchema.parse(request);
       
       // Get session ID
+      await orchestrator.ready();
       const targetSessionId = sessionId || orchestrator.getAllActiveSessions()[0]?.id;
       if (!targetSessionId) {
         return {

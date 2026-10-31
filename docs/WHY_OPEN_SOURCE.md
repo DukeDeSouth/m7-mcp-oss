@@ -141,7 +141,7 @@ code. Publishing lets me keep working on that question.
 | Multi-model debate                      | `src/hive/`, `docs/HIVE_USER_GUIDE.md`                                         |
 | Epistemic memory                        | `src/memory/`, `CHANGELOG.md` entry "prior epistemic work"                     |
 | Dated history                           | `CHANGELOG.md` from 0.1.0 (2025-06-15) onward                                  |
-| Tool surface                            | `docs/TOOLS_REGISTRY.md` (38 tools, generated from `tools/list`)               |
+| Tool surface                            | `docs/TOOLS_REGISTRY.md` (37 tools, generated from `tools/list`)               |
 | Why a fixed cycle at all                | `docs/M7_WHY_FULL_CYCLE.md`, `docs/methodology/M7_IDEAL_PRINCIPLES.md`         |
 
 ## 7. Status

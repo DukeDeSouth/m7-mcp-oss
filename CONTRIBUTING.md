@@ -19,7 +19,7 @@ npm run build               # tsc → dist/
 npm test                    # scripts/run-tests.sh
 ```
 
-Tests import from `dist/`, so build first. They write into `.m7/` in the repository root (git-ignored).
+Tests import from `dist/`, so build first. A test that writes state binds its own temporary project (`bindProject` / `makeProject` in `tests/helpers/deepScanHarness.mjs`); `npm test` fails if a run leaves files in the repository.
 
 To run the server manually:
 

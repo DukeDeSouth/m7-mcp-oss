@@ -5,7 +5,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createLogger } from '../../utils/logger.js';
 
@@ -27,7 +27,7 @@ import {
   IMPORTANT_DIRECTORIES
 } from './types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export class DefaultProjectScanner implements ProjectScanner {
   
@@ -134,31 +134,28 @@ export class DefaultProjectScanner implements ProjectScanner {
   }
 
   async scanGitInfo(rootPath: string): Promise<GitInfo> {
+    // Each field on its own: a repo without an origin remote still has a branch and commits.
+    const git = (args: string[]) => execFileAsync('git', args, { cwd: rootPath })
+      .then(({ stdout }) => stdout.trim() || undefined, () => undefined);
+
+    const [repository, branch, lastCommit, shortlog] = await Promise.all([
+      git(['remote', 'get-url', 'origin']),
+      git(['branch', '--show-current']),
+      git(['log', '-1', '--format=%h %s (%an, %ar)']),
+      git(['shortlog', '-sn', '--all']),
+    ]);
+
     const gitInfo: GitInfo = {};
-
-    try {
-      // Получаем информацию о репозитории
-      const { stdout: remoteUrl } = await execAsync('git remote get-url origin', { cwd: rootPath });
-      gitInfo.repository = remoteUrl.trim();
-
-      // Текущая ветка
-      const { stdout: branch } = await execAsync('git branch --show-current', { cwd: rootPath });
-      gitInfo.branch = branch.trim();
-
-      // Последний коммит
-      const { stdout: lastCommit } = await execAsync('git log -1 --format="%h %s (%an, %ar)"', { cwd: rootPath });
-      gitInfo.lastCommit = lastCommit.trim();
-
-      // Список контрибьюторов
-      const { stdout: contributors } = await execAsync('git shortlog -sn --all', { cwd: rootPath });
-      gitInfo.contributors = contributors.split('\n')
+    if (repository) gitInfo.repository = repository;
+    if (branch) gitInfo.branch = branch;
+    if (lastCommit) gitInfo.lastCommit = lastCommit;
+    if (shortlog) {
+      gitInfo.contributors = shortlog.split('\n')
         .filter(line => line.trim())
         .map(line => line.replace(/^\s*\d+\s+/, ''))
         .slice(0, 10); // Топ 10 контрибьюторов
-
-    } catch (error) {
-      log.warn('Git information not available');
     }
+    if (!branch && !lastCommit) log.warn('Git information not available');
 
     return gitInfo;
   }

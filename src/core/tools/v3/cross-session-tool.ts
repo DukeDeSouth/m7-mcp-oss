@@ -67,8 +67,6 @@ type CrossSessionParams = z.infer<typeof crossSessionSchema>;
 // TOOL DEFINITION
 // ============================================
 
-let learning: CrossSessionLearning | null = null;
-
 export const crossSessionTool = {
   name: 'mcp_m7_cross_session',
   description: `M7 v3.0 Cross-Session Learning - Learn from session patterns across time.
@@ -166,11 +164,8 @@ Format context for injection into AI prompt.
   async handler(request: any): Promise<any> {
     const params = crossSessionSchema.parse(request);
     
-    // Initialize if needed
-    if (!learning) {
-      learning = getCrossSessionLearning();
-      await learning.initialize();
-    }
+    const learning = getCrossSessionLearning();
+    await learning.initialize();
 
     try {
       let response = '';

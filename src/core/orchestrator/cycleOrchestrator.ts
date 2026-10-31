@@ -8,7 +8,7 @@
 import { createLogger } from '../utils/logger.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { getProjectPath } from '../utils/projectPath.js';
 import { atomicWriteJSON, safeReadJSON } from '../utils/atomicWrite.js';
 import { StatePersistError } from '../errors/statePersist.js';
@@ -74,6 +74,9 @@ export class CycleOrchestrator {
   private taskProjectRoots = new Map<string, string>();
   /** CYC-2: serialize submit/reflection/rewind per task */
   private taskQueues = new Map<string, Promise<unknown>>();
+  /** CYC-10: ids handed out by allocateCycleIdentity whose state is not committed yet */
+  private reservedTaskIds = new Set<string>();
+  private static readonly MAX_ID_ATTEMPTS = 8;
   
   constructor() {
     const projectPath = getProjectPath();
@@ -98,14 +101,66 @@ export class CycleOrchestrator {
   }
   
   /**
+   * CYC-10: a taskId and an artifact folder that no other cycle has. The folder is
+   * `<slug>-<suffix>` with the taskId's own suffix and is created here, exclusively.
+   */
+  private async allocateCycleIdentity(
+    description: string,
+    projectPath: string
+  ): Promise<{ taskId: string; taskSlug: string; artifactsDir: string }> {
+    const slug = this.generateSlug(description);
+    const cyclesRoot = path.join(projectPath, CYCLES_DIR);
+    await fs.mkdir(cyclesRoot, { recursive: true });
+
+    for (let attempt = 0; attempt < CycleOrchestrator.MAX_ID_ATTEMPTS; attempt++) {
+      const suffix = this.nextIdSuffix();
+      const taskId = this.generateTaskId(description, suffix);
+      if (this.cycles.has(taskId) || this.reservedTaskIds.has(taskId)) continue;
+      this.reservedTaskIds.add(taskId);
+
+      const taskSlug = `${slug}-${suffix}`;
+      const artifactsDir = path.join(cyclesRoot, taskSlug);
+      try {
+        if (await this.fileExists(this.cycleStatePathFor(projectPath, taskId))) {
+          this.reservedTaskIds.delete(taskId);
+          continue;
+        }
+        await fs.mkdir(artifactsDir);
+        return { taskId, taskSlug, artifactsDir };
+      } catch (err) {
+        this.reservedTaskIds.delete(taskId);
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+        throw err;
+      }
+    }
+    throw new Error(
+      `Could not allocate a unique cycle id after ${CycleOrchestrator.MAX_ID_ATTEMPTS} attempts`
+    );
+  }
+
+  private nextIdSuffix(): string {
+    return randomBytes(3).toString('hex');
+  }
+
+  private async fileExists(p: string): Promise<boolean> {
+    try {
+      await fs.access(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Remove cycle state files older than 7 days (CYC-9: skip active; archive completed)
    */
-  private async cleanupOldCycles(): Promise<void> {
+  private async cleanupOldCycles(projectPath: string): Promise<void> {
+    const cyclesDir = this.cyclesDirForProject(projectPath);
     try {
-      await fs.mkdir(this.cyclesDir, { recursive: true });
-      const archiveDir = path.join(this.cyclesDir, 'archive');
+      await fs.mkdir(cyclesDir, { recursive: true });
+      const archiveDir = path.join(cyclesDir, 'archive');
       await fs.mkdir(archiveDir, { recursive: true });
-      const files = await fs.readdir(this.cyclesDir);
+      const files = await fs.readdir(cyclesDir);
       const now = Date.now();
       const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -114,7 +169,7 @@ export class CycleOrchestrator {
         if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
         if (file.endsWith('.jsonl')) continue; // handled with matching .json
 
-        const filePath = path.join(this.cyclesDir, file);
+        const filePath = path.join(cyclesDir, file);
         try {
           const stat = await fs.stat(filePath);
           if (now - stat.mtimeMs <= maxAge) continue;
@@ -137,7 +192,7 @@ export class CycleOrchestrator {
           await fs.rename(filePath, dest);
           const cycleId = file.replace(/\.json$/, '');
           this.cycles.delete(cycleId);
-          const logPath = path.join(this.cyclesDir, `${cycleId}_REFLECTION_LOG.jsonl`);
+          const logPath = path.join(cyclesDir, `${cycleId}_REFLECTION_LOG.jsonl`);
           try {
             await fs.access(logPath);
             await fs.rename(logPath, path.join(archiveDir, `${cycleId}_REFLECTION_LOG.jsonl`));
@@ -181,12 +236,10 @@ export class CycleOrchestrator {
    * Start a new M7 cycle
    */
   async startCycle(description: string): Promise<CycleInstruction> {
-    // Cleanup old cycle state files on each new cycle start
-    await this.cleanupOldCycles();
-    const taskId = this.generateTaskId(description);
-    const taskSlug = this.generateSlug(description);
     const ownerProject = getProjectPath();
-    
+    await this.cleanupOldCycles(ownerProject);
+    const { taskId, taskSlug, artifactsDir } = await this.allocateCycleIdentity(description, ownerProject);
+
     const state: CycleState = {
       taskId,
       taskSlug,
@@ -218,11 +271,15 @@ export class CycleOrchestrator {
     };
     
     // Persist before exposing cycle in memory
-    await this.commitState(state);
-    
-    const artifactsDir = this.artifactsDirForState(state);
-    await fs.mkdir(artifactsDir, { recursive: true });
-    
+    try {
+      await this.commitState(state);
+    } catch (err) {
+      await fs.rm(artifactsDir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    } finally {
+      this.reservedTaskIds.delete(taskId);
+    }
+
     log.debug(`Started M7 Cycle: ${taskId}`);
     
     const committed = this.cycles.get(taskId)!;
@@ -888,15 +945,15 @@ export class CycleOrchestrator {
       artifact: {
         filename,
         path: `${artifactsDir}/${filename}`,
-        template: gateTemplate
+        template:
+          `Artifact \`${filename}\` is saved on disk. Complete the **Reflection Gate** section in the MCP response (single copy of the JSON template).`,
       },
       instruction: `📄 **Артефакт сохранён:** \`${artifactsDir}/${filename}\`
 ${this.extractBriefSummary(state.artifacts[state.currentPhase])}
 
-Фаза ${state.currentPhase.toUpperCase()} завершена. Пройдите Reflection Gate (${weight}).
+Фаза ${state.currentPhase.toUpperCase()} завершена. Пройдите Reflection Gate (${weight}). Полный текст gate — **один раз** в секции «Reflection Gate» ответа \`mcp_m7_cycle\` (GATE-3).
 
 ${this.buildCarryForward(state)}
-${gateTemplate}
 
 Ответьте JSON блоком, затем вызовите:
 \`\`\`
@@ -1105,16 +1162,12 @@ ${reflection.taskFramingUpdate ? `- **Task framing update:** ${reflection.taskFr
     if (!la || !state.lastSuccessfulResponse) {
       return null;
     }
-    if (la.phase !== state.currentPhase || la.kind !== kind) {
-      return null;
-    }
+    // A retry of the last accepted call matches by content only: after an accepted reflection the
+    // phase has moved on and cycleTool routes the retried JSON to submitArtifact.
     if (la.sha256 !== this.hashSubmitContent(content)) {
       return null;
     }
-    if (kind === 'reflection' && !state.awaitingReflection) {
-      return null;
-    }
-    log.debug(`CYC-2: idempotent replay ${kind} for phase ${state.currentPhase}`);
+    log.debug(`CYC-2: idempotent replay of ${la.kind} (submitted as ${kind}) from phase ${la.phase}`);
     return structuredClone(state.lastSuccessfulResponse);
   }
 
@@ -1456,23 +1509,28 @@ ${progressBar}`.trim();
     return names[phase];
   }
   
-  private generateTaskId(description: string): string {
-    const slug = description
+  private generateTaskId(description: string, suffix: string): string {
+    let slug = description
       .toLowerCase()
       .replace(/[^a-z0-9\s-]/g, '')
       .replace(/\s+/g, '-')
+      .replace(/^-+|-+$/g, '')
       .slice(0, 20);
-    const shortId = Date.now().toString().slice(-6);
-    return `cycle_${slug}_${shortId}`;
+    if (!slug) {
+      slug = createHash('sha1').update(description).digest('hex').slice(0, 8);
+    }
+    return `cycle_${slug}_${suffix}`;
   }
   
   private generateSlug(description: string): string {
-    // Handle Cyrillic and Latin characters
-    return description
+    // Any script; an empty slug would put the artifacts straight into m7-cycles/ (HYG-1)
+    const normalized = description
       .toLowerCase()
-      .replace(/[^a-zа-яё0-9\s-]/gi, '')
-      .replace(/\s+/g, '-')
-      .slice(0, 50);
+      .replace(/[^\p{L}\p{M}\p{N}\s-]/gu, '')
+      .trim()
+      .replace(/\s+/g, '-');
+    const slug = Array.from(normalized).slice(0, 50).join('').replace(/^-+|-+$/g, '');
+    return slug || createHash('sha1').update(description).digest('hex').slice(0, 8);
   }
   
   private async getState(taskId: string): Promise<CycleState | null> {
@@ -1527,6 +1585,7 @@ ${progressBar}`.trim();
     const folder = `${CYCLES_DIR}/${state.taskSlug}`;
     const phases = `${state.completedPhases.length}/7`;
     const date = new Date().toISOString().slice(5, 10); // MM-DD
+    const statusTag = state.status ?? 'active';
     
     // Read current registry to find next number
     let nextNum = 1;
@@ -1543,14 +1602,31 @@ ${progressBar}`.trim();
       registryContent = `# M7 Cycle Registry\n\n| # | Date | Type | Phases | Summary | Folder |\n|---|------|------|--------|---------|--------|\n`;
     }
     
-    const entry = `| ${nextNum} | ${date} | ${type} | ${phases} | ${summary} | ${folder} |`;
-    
-    // Append entry before the ADR section (or at end if no ADR)
-    const adrIndex = registryContent.indexOf('\n## ADR');
-    if (adrIndex > -1) {
-      registryContent = registryContent.slice(0, adrIndex) + entry + '\n' + registryContent.slice(adrIndex);
+    const entry = `| ${nextNum} | ${date} | ${type} | ${phases} | ${summary} [${statusTag}] | ${folder} |`;
+    const folderNeedle = `| ${folder} |`;
+
+    const lines = registryContent.split('\n');
+    let replaced = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].startsWith('| ') || !lines[i].includes(folderNeedle)) {
+        continue;
+      }
+      const numMatch = lines[i].match(/^\| (\d+) \|/);
+      const rowNum = numMatch ? numMatch[1] : String(nextNum);
+      lines[i] = `| ${rowNum} | ${date} | ${type} | ${phases} | ${summary} [${statusTag}] | ${folder} |`;
+      replaced = true;
+      break;
+    }
+
+    if (replaced) {
+      registryContent = lines.join('\n');
     } else {
-      registryContent = registryContent.trimEnd() + '\n' + entry + '\n';
+      const adrIndex = registryContent.indexOf('\n## ADR');
+      if (adrIndex > -1) {
+        registryContent = registryContent.slice(0, adrIndex) + entry + '\n' + registryContent.slice(adrIndex);
+      } else {
+        registryContent = registryContent.trimEnd() + '\n' + entry + '\n';
+      }
     }
     
     await fs.writeFile(registryPath, registryContent, 'utf-8');

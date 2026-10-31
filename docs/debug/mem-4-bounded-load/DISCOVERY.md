@@ -15,3 +15,7 @@
 ## Test
 
 `tests/mem4-bounded-load.test.mjs` — 2100-key `longterm.json`, one store, shutdown flush, file has ≥2101 keys.
+
+## Superseded in 3.22.1
+
+Steps 1 and 2 covered loading only: during normal work the 2001st record still evicted the first one from disk (MEM-5). `longterm` and `conceptual` are now plain `Map`s and `resizeStorageCap()` is gone; step 3 stays as a guard. `BoundedMap.setMaxSize()` lost its only caller and was removed.

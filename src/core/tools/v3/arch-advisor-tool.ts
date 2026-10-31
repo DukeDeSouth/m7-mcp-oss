@@ -16,6 +16,7 @@ import {
   AntipatternSeverity
 } from '../../../arch-advisor/index.js';
 import { getKnowledgeGraph } from '../../../knowledge-graph/index.js';
+import { getProjectPath } from '../../utils/projectPath.js';
 
 // ============================================
 // SCHEMA
@@ -120,7 +121,7 @@ Actions:
   
   async handler(request: any): Promise<any> {
     const params = archAdvisorSchema.parse(request) as ArchAdvisorParams;
-    const projectPath = params.project_path || process.cwd();
+    const projectPath = params.project_path || getProjectPath();
     
     try {
       const advisor = getArchitecturalAdvisor(projectPath);

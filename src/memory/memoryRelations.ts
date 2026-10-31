@@ -86,7 +86,8 @@ export interface MemoryConflictEntry {
 }
 
 export function collectActiveConflicts(
-  records: Iterable<MemoryRecord>
+  records: Iterable<MemoryRecord>,
+  resolveConfidence?: (id: string) => number | undefined
 ): MemoryConflictEntry[] {
   const seen = new Set<string>();
   const conflicts: MemoryConflictEntry[] = [];
@@ -113,7 +114,7 @@ export function collectActiveConflicts(
         recordB: depId,
         detectedAt: new Date().toISOString(),
         confidenceA: record.confidence ?? 0,
-        confidenceB: 0,
+        confidenceB: resolveConfidence?.(depId) ?? 0,
       });
     }
   }

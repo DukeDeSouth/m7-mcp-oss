@@ -79,21 +79,9 @@ export function generateIntelligentHints(context: HintContext): string[] {
     }
   }
   
-  // Error-based hints (only if errors are trending up)
-  if (context.recentErrors && context.recentErrors.length > 0) {
-    const topErrorCategory = context.recentErrors[0].category;
-    const errorHints: Record<string, string> = {
-      compilation: '⚠️ Compilation errors detected - check syntax and imports',
-      runtime: '⚠️ Runtime errors increasing - add more error handling',
-      security: '🔒 Security issues found - review security best practices',
-      performance: '⚡ Performance degrading - consider profiling',
-      logic: '🤔 Logic errors detected - review requirements'
-    };
-    
-    if (errorHints[topErrorCategory] && context.recentErrors[0].count > 2) {
-      hints.push(errorHints[topErrorCategory]);
-    }
-  }
+  // Error-based hints: journal.getErrorsByType() returns cumulative totals, not
+  // a time-series — "increasing" cannot be inferred (KNOWN_ISSUES / GATE-3).
+  // Intentionally no banner here until delta metrics exist.
   
   // Time-based hints
   if (context.sessionDuration) {

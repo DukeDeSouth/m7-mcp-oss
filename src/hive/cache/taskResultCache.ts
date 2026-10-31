@@ -74,14 +74,12 @@ export class TaskResultCache {
    * Generate hash for task description
    */
   private hashTask(description: string): string {
-    // Normalize: lowercase, remove extra whitespace, sort words
     const normalized = description
       .toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 2)
-      .sort()
-      .join(' ');
+      .trim()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     
     return createHash('md5').update(normalized).digest('hex');
   }

@@ -13,6 +13,7 @@ const log = createLogger('[CrossSession]');
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { getProjectPath } from '../core/utils/projectPath.js';
 import { 
   Insight, 
   ProjectGuideline, 
@@ -34,9 +35,9 @@ export class KnowledgeAccumulator {
   private heuristics: Map<string, HeuristicRule> = new Map();
   private stats: LearningStats;
 
-  constructor(config: Partial<CrossSessionConfig> = {}) {
+  constructor(config: Partial<CrossSessionConfig> = {}, projectPath: string = getProjectPath()) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.basePath = path.join(process.cwd(), '.m7', 'cross-session');
+    this.basePath = path.join(projectPath, '.m7', 'cross-session');
     this.stats = this.initStats();
   }
 
@@ -552,7 +553,7 @@ export class KnowledgeAccumulator {
       );
 
     } catch (error) {
-      log.debug('KnowledgeAccumulator] Error saving to disk:', error);
+      log.warn('KnowledgeAccumulator] Error saving to disk:', error);
     }
   }
 

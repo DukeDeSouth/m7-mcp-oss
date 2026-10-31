@@ -5,14 +5,20 @@
  * Run: npm run build && node --test --test-force-exit tests/stage1-fixes-100.test.mjs
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir, readFile, rm, chmod } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 
-process.env.M7_PROJECT_PATH = process.env.M7_PROJECT_PATH || path.join(import.meta.dirname, '..');
-process.env.CURSOR_WORKSPACE = process.env.CURSOR_WORKSPACE || process.env.M7_PROJECT_PATH;
+const PROJECT = await mkdtemp(path.join(tmpdir(), 'm7-stage1-'));
+process.env.M7_PROJECT_PATH = PROJECT;
+process.env.CURSOR_WORKSPACE = PROJECT;
+const { resetProjectPathStateForTests } = await import('../dist/core/utils/projectPath.js');
+resetProjectPathStateForTests();
+after(async () => {
+  await rm(PROJECT, { recursive: true, force: true }).catch(() => {});
+});
 
 const { CycleOrchestrator } = await import('../dist/core/orchestrator/cycleOrchestrator.js');
 const { TaskOrchestrator } = await import('../dist/core/orchestrator/taskOrchestrator.js');

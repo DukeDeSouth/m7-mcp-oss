@@ -56,7 +56,7 @@ const MeshToolSchema = z.object({
   description: z.string().optional().describe('Intent description'),
 
   // For init
-  project_root: z.string().optional().describe('Project root path (default: cwd)'),
+  project_root: z.string().optional().describe('Project root path (default: the active project)'),
 
   // For events / tasks
   limit: z.number().optional().describe('Number of recent events/tasks to show (default: 20)'),
@@ -109,14 +109,15 @@ function handleInit(params: any): string {
   }
 
   mesh.init();
-  mesh.join(params.server_role, params.project_root);
+  const projectRoot = params.project_root || getProjectPath();
+  mesh.join(params.server_role, projectRoot);
 
   const peers = mesh.getPeers();
   
   return `🔗 M7 Mesh initialized!\n\n` +
     `Instance ID: ${mesh.getInstanceId()}\n` +
     `PID: ${process.pid}\n` +
-    `Project: ${params.project_root || process.cwd()}\n` +
+    `Project: ${projectRoot}\n` +
     `Role: ${params.server_role || '(none)'}\n\n` +
     `Discovered ${peers.length} peer(s).\n` +
     (peers.length > 0

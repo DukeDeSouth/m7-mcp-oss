@@ -1,18 +1,9 @@
-import { createLogger } from '../utils/logger.js';
-const log = createLogger('[healthCheck]');
 /**
  * M7 v3.3 - Health Check Module
  * 
- * Проверка состояния всех компонентов системы
- * и автоматический запуск Docker при необходимости
+ * Проверка состояния всех компонентов системы.
+ * Только сообщает о состоянии — ничего не запускает на хосте.
  */
-
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { existsSync } from 'fs';
-import * as path from 'path';
-
-const execAsync = promisify(exec);
 
 // ============================================================================
 // Types
@@ -28,8 +19,6 @@ export interface ComponentStatus {
 export interface SystemHealth {
   components: ComponentStatus[];
   overallStatus: 'healthy' | 'degraded' | 'unhealthy';
-  dockerStartAttempted?: boolean;
-  dockerStartSuccess?: boolean;
   checkDuration: number;
 }
 
@@ -50,6 +39,12 @@ const CACHE_TTL = 60000; // 60 секунд
  */
 async function checkChromaDB(): Promise<ComponentStatus> {
   const chromaUrl = process.env.CHROMA_URL || 'http://localhost:8000';
+  const offline = (message: string): ComponentStatus => ({
+    name: 'Vector Memory (ChromaDB)',
+    status: 'offline',
+    message,
+    action: `optional: start ChromaDB at ${chromaUrl} or set CHROMA_URL; memory uses local JSON until then`,
+  });
   
   try {
     const controller = new AbortController();
@@ -64,27 +59,9 @@ async function checkChromaDB(): Promise<ComponentStatus> {
     if (response.ok) {
       return { name: 'Vector Memory (ChromaDB)', status: 'online' };
     }
-    return { 
-      name: 'Vector Memory (ChromaDB)', 
-      status: 'offline',
-      message: 'Not healthy',
-      action: 'docker compose up -d'
-    };
+    return offline('Not healthy');
   } catch (error: any) {
-    if (error.name === 'AbortError') {
-      return { 
-        name: 'Vector Memory (ChromaDB)', 
-        status: 'offline',
-        message: 'Connection timeout',
-        action: 'docker compose up -d'
-      };
-    }
-    return { 
-      name: 'Vector Memory (ChromaDB)', 
-      status: 'offline',
-      message: 'Not running',
-      action: 'docker compose up -d'
-    };
+    return offline(error.name === 'AbortError' ? 'Connection timeout' : 'Not running');
   }
 }
 
@@ -97,7 +74,7 @@ function checkOpenAI(): ComponentStatus {
       name: 'OpenAI API', 
       status: 'offline', 
       message: 'API key not set',
-      action: 'export OPENAI_API_KEY=your_key'
+      action: '`export OPENAI_API_KEY=your_key`'
     };
   }
   return { name: 'OpenAI API', status: 'online' };
@@ -112,7 +89,7 @@ function checkAnthropic(): ComponentStatus {
       name: 'Anthropic API', 
       status: 'offline', 
       message: 'API key not set',
-      action: 'export ANTHROPIC_API_KEY=your_key'
+      action: '`export ANTHROPIC_API_KEY=your_key`'
     };
   }
   return { name: 'Anthropic API', status: 'online' };
@@ -126,86 +103,6 @@ function checkM7Core(): ComponentStatus {
 }
 
 // ============================================================================
-// Docker Auto-Start
-// ============================================================================
-
-/**
- * Попытаться автоматически запустить Docker
- */
-export async function tryStartDocker(): Promise<boolean> {
-  try {
-    // Найти docker-compose.yml
-    const possiblePaths = [
-      path.join(process.cwd(), 'docker-compose.yml'),
-      path.join(process.cwd(), 'docker-compose.yaml'),
-      path.join(process.cwd(), 'compose.yml'),
-      path.join(process.cwd(), 'compose.yaml'),
-    ];
-    
-    let composeFile: string | null = null;
-    for (const p of possiblePaths) {
-      if (existsSync(p)) {
-        composeFile = p;
-        break;
-      }
-    }
-    
-    if (!composeFile) {
-      log.debug('M7 Health] No docker-compose file found, skipping auto-start');
-      return false;
-    }
-    
-    // Проверить запущен ли Docker daemon
-    try {
-      await execAsync('docker info', { timeout: 5000 });
-    } catch {
-      log.debug('M7 Health] Docker daemon not running');
-      return false;
-    }
-    
-    // Попробовать запустить
-    log.debug('M7 Health] Attempting to start Docker containers...');
-    const composeDir = path.dirname(composeFile);
-    
-    await execAsync('docker compose up -d', { 
-      timeout: 30000,
-      cwd: composeDir
-    });
-    
-    // Подождать пока ChromaDB станет доступен (до 15 секунд)
-    const chromaUrl = process.env.CHROMA_URL || 'http://localhost:8000';
-    
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2000);
-        
-        const response = await fetch(`${chromaUrl}/api/v2/heartbeat`, {
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
-        
-        if (response.ok) {
-          log.debug('M7 Health] ✅ Docker containers started successfully!');
-          return true;
-        }
-      } catch {
-        // Продолжаем ждать
-      }
-    }
-    
-    log.debug('M7 Health] ⚠️ Docker started but ChromaDB not responding');
-    return false;
-    
-  } catch (error: any) {
-    log.debug(`M7 Health] Failed to start Docker: ${error.message}`);
-    return false;
-  }
-}
-
-// ============================================================================
 // Main Health Check
 // ============================================================================
 
@@ -213,10 +110,9 @@ export async function tryStartDocker(): Promise<boolean> {
  * Проверить состояние всех компонентов системы
  */
 export async function checkSystemHealth(options?: {
-  autoStartDocker?: boolean;
   skipCache?: boolean;
 }): Promise<SystemHealth> {
-  const { autoStartDocker = true, skipCache = false } = options || {};
+  const { skipCache = false } = options || {};
   
   // Проверить кеш
   if (!skipCache && cachedHealth && (Date.now() - cacheTimestamp) < CACHE_TTL) {
@@ -232,28 +128,6 @@ export async function checkSystemHealth(options?: {
     checkOpenAI(),
     checkAnthropic(),
   ];
-  
-  let dockerStartAttempted = false;
-  let dockerStartSuccess = false;
-  
-  // Если ChromaDB offline и autoStartDocker включен — попробовать запустить
-  const chromaStatus = components.find(c => c.name.includes('ChromaDB'));
-  if (chromaStatus?.status === 'offline' && autoStartDocker) {
-    dockerStartAttempted = true;
-    dockerStartSuccess = await tryStartDocker();
-    
-    // Если успешно запустили — обновить статус
-    if (dockerStartSuccess) {
-      const idx = components.findIndex(c => c.name.includes('ChromaDB'));
-      if (idx !== -1) {
-        components[idx] = { 
-          name: 'Vector Memory (ChromaDB)', 
-          status: 'online',
-          message: 'Auto-started'
-        };
-      }
-    }
-  }
   
   // Определить общий статус
   const offlineCount = components.filter(c => c.status === 'offline').length;
@@ -271,8 +145,6 @@ export async function checkSystemHealth(options?: {
   const health: SystemHealth = {
     components,
     overallStatus,
-    dockerStartAttempted,
-    dockerStartSuccess,
     checkDuration: Date.now() - startTime,
   };
   
@@ -328,21 +200,8 @@ ${health.components.map(c =>
   if (offlineComponents.length > 0) {
     result += `
 ### 🛠️ To fix:
-${offlineComponents.map(c => `- **${c.name}**: \`${c.action}\``).join('\n')}
+${offlineComponents.map(c => `- **${c.name}**: ${c.action}`).join('\n')}
 `;
-  }
-
-  // Информация о попытке auto-start
-  if (health.dockerStartAttempted) {
-    if (health.dockerStartSuccess) {
-      result += `
-💡 *Docker was auto-started successfully*
-`;
-    } else {
-      result += `
-⚠️ *Docker auto-start attempted but failed. Please start manually.*
-`;
-    }
   }
 
   return result;
