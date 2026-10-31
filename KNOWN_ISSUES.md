@@ -51,7 +51,7 @@ Items marked `good first issue` are self-contained and need no knowledge of the 
 | HYG-3 | Shell command built by string interpolation | low | 3 | enhancement, good first issue | open |
 | HYG-4 | Debug tool prints API key prefixes | low | 3 | enhancement, good first issue | open |
 | HYG-5 | README describes rule re-injection as counting "tool calls" | low | 3 | documentation, good first issue | open |
-| HYG-6 | `M7CodeInterceptor` is dead code | low | 3 | enhancement, good first issue | open |
+| HYG-6 | `M7CodeInterceptor` is dead code | low | 3 | enhancement, good first issue | fixed in #11 |
 
 ## Roadmap
 
@@ -480,7 +480,7 @@ Order: HYG-1, HYG-3, HYG-4, HYG-5, HYG-6, GATE-3, CYC-8 — independent of each 
 
 ### HYG-6 — `M7CodeInterceptor` is dead code
 
-**Severity:** low · **Stage:** 3 · **Labels:** enhancement, good first issue · **Status:** open
+**Severity:** low · **Stage:** 3 · **Labels:** enhancement, good first issue · **Status:** fixed in #11
 
 **Where:** `src/core/enforcement/codeInterceptor.ts` L31: `export class M7CodeInterceptor`; no other file under `src/` references it.
 
