@@ -22,7 +22,5 @@
 export * from './types.js';
 export * from './sanitizer.js';
 export * from './collector.js';
-export * from './gitCapture.js';
 export * from './exporters.js';
-export * from './retroClassifier.js';
 export * from './epistemicMetrics.js';
