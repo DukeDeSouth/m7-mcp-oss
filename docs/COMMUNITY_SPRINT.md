@@ -2,7 +2,7 @@
 
 Implementation passes on [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) after triaging an external source review. The review surfaced concrete defects; maintainers re-verified each item against the public snapshot before listing it.
 
-**Review context:** [DiadkoShmek](https://github.com/DiadkoShmek) — related fail-closed workflow work: [evidence-gated-agent-workflows](https://github.com/DiadkoShmek/evidence-gated-agent-workflows).
+**Review:** "Deep Scan M7" by [@DiadkoShmek](https://github.com/DiadkoShmek), October 28, 2026, against the `72a7640` snapshot (3.18.0). Related fail-closed workflow work by the same author: [evidence-gated-agent-workflows](https://github.com/DiadkoShmek/evidence-gated-agent-workflows).
 
 ## Batch 1 — v3.18.1 (Stage 1, first slice)
 

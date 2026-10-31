@@ -70,7 +70,7 @@ For context, since harness-engineering frameworks became a popular topic in
   carry-forward context, template-driven artifacts.
 - July 2026: epistemic layer (fog of war boundaries, grounding gate, adversarial
   review gate, control-channel nonce, rule re-injection).
-- October 2026: public community-fix batches on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — v3.18.1 (batch 1), v3.19.0 (Stage 1 remainder + Stage 2 cycles), v3.20.0–v3.22.2 (Stage 2–3, acceptance suites; every item on the list is fixed); see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+- October 2026: the "Deep Scan M7" review by [@DiadkoShmek](https://github.com/DiadkoShmek), then public community-fix batches on [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — v3.18.1 (batch 1), v3.19.0 (Stage 1 remainder + Stage 2 cycles), v3.20.0–v3.22.2 (Stage 2–3, acceptance suites; every item on the list is fixed); see [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
 
 ## Requirements
 
@@ -201,6 +201,14 @@ promise fast turnaround. If you want something concrete to work on,
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md) lists confirmed defects with code
 references and a suggested order. The first response sprint (Stage 1 batch 1) is
 documented in [docs/COMMUNITY_SPRINT.md](docs/COMMUNITY_SPRINT.md).
+
+## Thanks
+
+[@DiadkoShmek](https://github.com/DiadkoShmek) wrote "Deep Scan M7" (October 28,
+2026), a source-level review of the 3.18.0 snapshot. Most of
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the fixes in v3.19.0–v3.22.2 come from
+it. [@conradipui-glitch](https://github.com/conradipui-glitch) found and fixed
+the Windows write and project-path bugs (#9).
 
 ## License
 
